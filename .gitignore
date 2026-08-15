@@ -1,0 +1,11 @@
+# 依赖目录
+node_modules/
+
+# Electron 构建产物
+dist/
+out/
+build/
+
+# 缓存
+.npm
+.eslintcache

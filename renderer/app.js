@@ -1433,33 +1433,34 @@ function handleLiveEditorClick(e) {
 let liveEdit = null   // { mode:'line'|'block', paneIdx, blk, lineNo, s, e, ta, cancel }
 
 // —— 行编辑撤销栈（Ctrl+Z）：记录提交 / 移动前的行内容 ——
-let editUndoStack = []   // [{ paneIdx, lineNo, old, next }]（block 模式 old/next 为行区间数组）
+let editUndoStack = []   // [{ path, content }]：每次编辑前的完整内容快照
 const EDIT_UNDO_MAX = 60
 
-function pushEditUndo(path, lineNo, oldVal, newVal) {
-    if (oldVal === newVal) return
-    editUndoStack.push({ path, paneIdx: null, lineNo, old: oldVal, next: newVal })
+// 快照式撤销：捕获修改前的全文内容。行号漂移（插入/删除行）天然免疫。
+function pushEditUndo(path) {
+    const tab = state.tabs.find((t) => t.path === path) || state.tabs.find((t) => t.id === path)
+    if (!tab || typeof tab.content !== 'string') return
+    const last = editUndoStack[editUndoStack.length - 1]
+    if (last && last.path === (tab.path || path) && last.content === tab.content) return   // 去重：无操作不入栈
+    editUndoStack.push({ path: tab.path || path, content: tab.content })
     if (editUndoStack.length > EDIT_UNDO_MAX) editUndoStack.shift()
 }
 
-// Ctrl+Z：恢复上一次行编辑前的状态（提交 / 移动 / 回车换行前的行内容）
-// 优先按"编辑时记录的路径"定位标签，避免面板切换后撤回到错误文件
+// Ctrl+Z：恢复上一次编辑前的完整内容快照
 function undoLineEdit() {
     const item = editUndoStack.pop()
     if (!item) return
-    const tab = (item.path && state.tabs.find((t) => t.path === item.path))
-        || (item.paneIdx != null && state.tabs.find((t) => t.id === state.panes[item.paneIdx].tabId))
-        || null
-    const f = tab && tab.path ? tab : null
-    if (!f) return
+    const tab = state.tabs.find((t) => t.path === item.path) || state.tabs.find((t) => t.id === item.path)
+    if (!tab) return
     if (liveEdit) commitLineEdit()
-    const lines = f.content.split('\n')
-    if (item.lineNo < 0 || item.lineNo >= lines.length) return
-    lines[item.lineNo] = item.old
-    f.content = lines.join('\n')
-    // 定位文件所在面板（可能在非活动面板；不在任何面板则只改内容，激活时自然渲染）
+    tab.content = item.content
+    // 同步所有打开该文件的文本框
+    for (let i = 0; i < state.panes.length; i++) {
+        const pEls = paneEls(i)
+        if (state.panes[i].tabId === tab.id && pEls.editor) pEls.editor.value = tab.content
+    }
     const pi = state.panes.findIndex((p) => p.tabId === tab.id)
-    if (pi < 0) return
+    if (pi < 0) { renderTabs(); return }
     updateSaveStatus(pi)
     renderTabs()
     if (state.activePane === pi) renderOutline()
@@ -1467,29 +1468,31 @@ function undoLineEdit() {
     const st = P.liveEditor.scrollTop
     renderLiveEditor(pi)
     P.liveEditor.scrollTop = st
-    // 恢复后打开该行编辑，方便继续操作
-    if (state.activePane === pi) setTimeout(() => openLineAt(item.lineNo), 0)
 }
 
-// 向上找"行容器"元素（不越过 blk）：li / 标题 / 段落 / 引用
+// 向上找"行容器"元素（不越过 blk）：li / 标题 / 段落 / 引用 / 软换行行片段（span.md-line）
 function rowElementOf(node, blk) {
     let el = node && node.nodeType === 3 ? node.parentNode : node
     while (el && el !== blk) {
         if (!el.tagName) { el = el.parentNode; continue }
         const tag = el.tagName.toUpperCase()
         if (tag === 'LI' || /^H[1-6]$/.test(tag) || tag === 'P' || tag === 'BLOCKQUOTE' || tag === 'HR') return el
+        if (tag === 'SPAN' && el.classList && el.classList.contains('md-line')) return el
         el = el.parentNode
     }
     return null
 }
 
-// 块内行容器列表（行号映射基准）
+// 块内行容器列表（行号映射基准）；软换行段落用 span.md-line 表示各源行，
+// 此时排除包裹它们的 <p>，避免同一段落被计数两次
 function rowElementsOf(blk) {
-    return [...blk.querySelectorAll('li, h1, h2, h3, h4, h5, h6, p, blockquote, hr')]
+    return [...blk.querySelectorAll('li, h1, h2, h3, h4, h5, h6, p, blockquote, hr, span.md-line')]
+        .filter((el) => !(el.tagName === 'P' && el.querySelector('span.md-line')))
 }
 
-// 行容器 → 源行号（块起始行 + 容器序号）
+// 行容器 → 源行号：软换行行片段直接读 data-line；其余 = 块起始行 + 容器序号
 function rowElToLineNo(blk, rowEl) {
+    if (rowEl && rowEl.dataset && rowEl.dataset.line != null) return parseInt(rowEl.dataset.line, 10)
     const idx = rowElementsOf(blk).indexOf(rowEl)
     if (idx < 0) return -1
     return parseInt(blk.dataset.s, 10) + idx
@@ -1505,13 +1508,12 @@ function openLineEditor(e, blk) {
     const s = parseInt(blk.dataset.s, 10)
     const eEnd = parseInt(blk.dataset.e, 10)
     if (isNaN(s) || isNaN(eEnd) || s < 0 || eEnd < s) return
-    // 整块编辑：表格 / 代码块 / 多行段落块（data-s<data-e 且非列表）
+    // 整块编辑：表格 / 代码块 / 多行引用；软换行段落（span.md-line）与列表走行模式逐行编辑
     const hasTablePre = blk.querySelector('table, pre')
     const hasList = blk.querySelector('ul, ol')
-    if (hasTablePre || (eEnd > s && !hasList)) {
-        openBlockInlineEditor(blk, s, eEnd)
-        return
-    }
+    const hasMdLine = blk.querySelector('span.md-line')
+    if (hasTablePre) { openBlockInlineEditor(blk, s, eEnd); return }
+    if (eEnd > s && !hasList && !hasMdLine) { openBlockInlineEditor(blk, s, eEnd); return }
     // 行容器定位：用坐标重新命中（重渲染后旧 e.target 已 detached；合成/真实点击坐标始终有效）
     const node = document.elementFromPoint(e.clientX, e.clientY) || e.target
     const rowEl = rowElementOf(node, blk)
@@ -1668,10 +1670,34 @@ function bindLineEditorEvents(ta) {
         }
         if (ev.key === 'ArrowUp') { ev.preventDefault(); moveLineEdit(-1); return }
         if (ev.key === 'ArrowDown') { ev.preventDefault(); moveLineEdit(1); return }
+        // Backspace 空行回退：空行 + 光标在行首 → 删除该空行并回到上一行行尾
+        if (ev.key === 'Backspace' && liveEdit && liveEdit.mode === 'line' && ta.value === '' && ta.selectionStart === 0) {
+            ev.preventDefault()
+            backspaceBlankLine()
+            return
+        }
     })
     ta.addEventListener('blur', () => commitLineEdit())
     ta.focus()
     ta.setSelectionRange(ta.value.length, ta.value.length)
+}
+
+// Backspace 空行回退：删除当前空行并回到上一行行尾（Obsidian 行为）
+function backspaceBlankLine() {
+    const le = liveEdit
+    if (!le || le.mode !== 'line') return
+    const tab = state.tabs.find((t) => t.path === le.path)
+        || state.tabs.find((t) => t.id === state.panes[le.paneIdx].tabId) || null
+    const f = tab && tab.path ? tab : null
+    if (!f) { commitLineEdit(); return }
+    const lines = f.content.split('\n')
+    if (le.lineNo <= 0 || le.lineNo >= lines.length) { commitLineEdit(); return }
+    if ((lines[le.lineNo] || '') !== '') { commitLineEdit(); return }   // 非空行：走默认删除
+    const prevLen = (lines[le.lineNo - 1] || '').length
+    pushEditUndo(f.path)
+    lines.splice(le.lineNo, 1)
+    f.content = lines.join('\n')
+    commitAndReopen(le.lineNo - 1, prevLen)
 }
 
 // 行编辑器内容 → 状态栏行号 + lastCaretPos（供插件插入定位）
@@ -1712,7 +1738,7 @@ function moveLineEdit(delta) {
     if (next < 0 || next >= lines.length) return   // 边界：不越出文档
     // 保存当前行修改（记录撤销），然后在新行位置重新打开编辑器 → 光标跟随移动
     const col = le.ta.selectionStart
-    pushEditUndo(f.path, le.lineNo, lines[le.lineNo], le.ta.value)
+    if (le.ta.value !== lines[le.lineNo]) pushEditUndo(f.path)
     lines[le.lineNo] = le.ta.value
     f.content = lines.join('\n')
     commitAndReopen(next, col)
@@ -1736,13 +1762,13 @@ function commitLineEdit() {
     const lines = f.content.split('\n')
     if (le.mode === 'line') {
         if (le.lineNo >= 0 && le.lineNo < lines.length) {
-            pushEditUndo(f.path, le.lineNo, lines[le.lineNo], newVal)
+            if (newVal !== lines[le.lineNo]) pushEditUndo(f.path)
             lines[le.lineNo] = newVal
         }
     } else {
         const replacement = newVal === '' ? [''] : newVal.split('\n')
         if (le.s >= 0 && le.s <= le.e && le.e < lines.length) {
-            pushEditUndo(f.path, le.s, lines.slice(le.s, le.e + 1).join('\n'), newVal)
+            if (lines.slice(le.s, le.e + 1).join('\n') !== newVal) pushEditUndo(f.path)
             lines.splice(le.s, le.e - le.s + 1, ...replacement)
         }
     }
@@ -1828,7 +1854,7 @@ function lineEditEnter() {
         return
     }
     // 提交当前行（记录撤销）
-    pushEditUndo(f.path, le.lineNo, lines[le.lineNo], curLine)
+    pushEditUndo(f.path)
     lines[le.lineNo] = curLine
     if (marker) {
         // 下一行是"空标识行"（上一次回车产生，且光标又回到本行）→ 去掉标识并下移（结束列表）
@@ -1873,6 +1899,10 @@ function showPaneEditorInput(i) {
         P.liveEditor.classList.remove('hidden')
         P.editor.classList.add('hidden')
         renderLiveEditor(i)
+        // 空文档（新建笔记）：自动打开第 0 行编辑器，用户可直接输入（贴合 Obsidian）
+        if (i === state.activePane && f.content.trim() === '') {
+            setTimeout(() => openLineAt(0, i, 0), 0)
+        }
     } else {
         P.editor.classList.remove('hidden')
         P.liveEditor.classList.add('hidden')
@@ -2871,6 +2901,7 @@ function srcApply(fn, lineNo) {
     }
     const f = state.currentFile
     if (!f) return
+    pushEditUndo(f.path)   // 右键格式化/删除/插入链接等操作可撤销
     fn(f)
     for (let i = 0; i < state.panes.length; i++) {
         const pEls = paneEls(i)
@@ -2900,6 +2931,28 @@ function lineSrcOffset(lineNo) {
     return s
 }
 
+// 定位覆盖 pos 的链接（wikilink [[目标]] / [[目标|别名]] 或 markdown 链接 [文字](url)）。
+// 返回 { start, end, keep }：start/end 为链接整体在文本中的区间，keep 为移除语法后保留的文字。
+function findLinkAround(text, pos) {
+    const s = String(text || '')
+    const wlRe = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g
+    const mdRe = /\[([^\]]+)\]\(([^)\n]*)\)/g
+    let m
+    wlRe.lastIndex = 0
+    while ((m = wlRe.exec(s))) {
+        if (pos >= m.index && pos <= m.index + m[0].length) {
+            return { start: m.index, end: m.index + m[0].length, keep: (m[2] != null && m[2] !== '') ? m[2] : m[1] }
+        }
+    }
+    mdRe.lastIndex = 0
+    while ((m = mdRe.exec(s))) {
+        if (pos >= m.index && pos <= m.index + m[0].length) {
+            return { start: m.index, end: m.index + m[0].length, keep: m[1] }
+        }
+    }
+    return null
+}
+
 // 把行编辑器当前值写回源文件（不重渲染、不退出编辑）：供右键菜单操作基于最新内容
 function flushLineEditValue() {
     const le = liveEdit
@@ -2909,6 +2962,7 @@ function flushLineEditValue() {
     if (!f) return
     const lines = f.content.split('\n')
     if (le.lineNo >= 0 && le.lineNo < lines.length && lines[le.lineNo] !== le.ta.value) {
+        pushEditUndo(f.path)
         lines[le.lineNo] = le.ta.value
         f.content = lines.join('\n')
     }
@@ -2972,6 +3026,16 @@ function handleLiveEditorCtxMenu(e) {
         } })
     }
     items.push({ label: '🔗 插入内部笔记链接…', action: () => { hideContextMenu(); openLinkPicker() } })
+    items.push({ label: '🔗 移除链接', action: () => {
+        const p = selRange ? selRange.start : pos
+        if (p < 0) return
+        srcApply((f) => {
+            const norm = f.content.replace(/\r\n/g, '\n')
+            const link = findLinkAround(norm, p)
+            if (!link) { showNotice('光标不在链接内'); return }
+            f.content = norm.slice(0, link.start) + link.keep + norm.slice(link.end)
+        })
+    } })
     items.push({ label: '标题', submenu: headings })
     items.push(
         { label: '加粗', action: () => liveSurround('**', '**', '加粗文本', pos, selRange, lineNo) },

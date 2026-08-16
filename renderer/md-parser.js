@@ -139,8 +139,13 @@
     while (i < n) {
       var t = lines[i].trim()
       if (t === '') {
+        // 空行作为独立可编辑块（所见即所得：空行可见、可点击、连续换行可续编）。
+        // annotate=false（blockquote 内部递归）不产出，保持块级分隔语义。
+        if (annotate !== false) {
+          out.push('<div class="blk" data-s="' + i + '" data-e="' + i + '"><p class="md-empty"></p></div>')
+        }
         i++
-        continue // 空行只作为块分隔
+        continue
       }
       var start = i
       var blockHtml
@@ -167,7 +172,7 @@
         blockHtml = list.html
         i = list.nextIndex
       } else {
-        var para = parseParagraph(lines, i)
+        var para = parseParagraph(lines, i, annotate)
         blockHtml = para.html
         i = para.nextIndex
       }
@@ -228,7 +233,8 @@
   }
 
   // 段落：空行或块级起点之间；段内单个换行 → <br>
-  function parseParagraph(lines, i) {
+  function parseParagraph(lines, i, annotate) {
+    var start = i
     var buf = []
     while (i < lines.length && !isBlockStart(lines, i)) {
       var t = lines[i].trim()
@@ -236,8 +242,18 @@
       buf.push(t)
       i++
     }
+    var html
+    if (buf.length === 1 || annotate === false) {
+      // 单行段落 / 嵌套（blockquote 内部，行号相对，不可用于逐行编辑）：合并渲染
+      html = renderInline(buf.join('\n')).replace(/\n/g, '<br>\n')
+    } else {
+      // 顶层软换行段落：逐行渲染并标记 data-line，支持逐行独立编辑（Obsidian 行为）
+      html = buf.map(function (ln, k) {
+        return '<span class="md-line" data-line="' + (start + k) + '">' + renderInline(ln) + '</span>'
+      }).join('<br>\n')
+    }
     return {
-      html: '<p>' + renderInline(buf.join('\n')).replace(/\n/g, '<br>\n') + '</p>',
+      html: '<p>' + html + '</p>',
       nextIndex: i,
     }
   }

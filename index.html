@@ -1287,10 +1287,10 @@
             background: transparent;
             color: var(--text);
             font-family: inherit;      /* 与预览同字体，不换字体 */
-            font-size: 17px;           /* 与预览正文（.md-body 17px）完全一致，编辑不跳字号 */
+            font-size: inherit;        /* 继承所在块（标题/正文/列表）字号，消除编辑时大小跳变 */
             font-weight: inherit;
             font-style: inherit;
-            line-height: 1.7;
+            line-height: inherit;
             letter-spacing: inherit;
             padding: 0;
             margin: 0;
@@ -1368,6 +1368,11 @@
         }
         .md-body p {
             margin: 0.7em 0;
+        }
+        /* 空白行占位（所见即所得：空行可见、可点击进入编辑；阅读态不过度增高） */
+        .md-body p.md-empty {
+            min-height: 1.4em;
+            margin: 0;
         }
         .md-body a {
             color: var(--accent-strong);

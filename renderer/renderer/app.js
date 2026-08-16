@@ -23,10 +23,9 @@ const state = {
     searchIndex: 0,          // 快速切换器当前高亮的项
     cursorLine: 1,           // 光标行（状态栏）
     cursorCol: 1,            // 光标列（状态栏）
-    theme: localStorage.getItem('emerald-theme') || 'light',   // 有效主题（随 themeMode 更新）
-    themeMode: localStorage.getItem('emerald-theme-mode') || 'light',   // 亮 / 暗 / 跟随系统
+    theme: localStorage.getItem('emerald-theme') || 'light',
     contextMenu: null,       // 当前打开的右键菜单 DOM
-    sortMode: localStorage.getItem('emerald-sort-mode') || 'name',   // 排序方式：name / name-desc / type（D 设置可改默认）
+    sortMode: 'name',        // 排序方式：name / name-desc / type
     history: [],             // 打开过的文件路径序列（后退/前进导航）
     historyIndex: -1,        // 当前在 history 中的位置
     sidebarCollapsed: false, // 目录栏是否收起
@@ -114,9 +113,7 @@ function createPaneDom() {
     const fileMeta = document.createElement('span'); fileMeta.className = 'fileMeta'
     const saveStatus = document.createElement('span'); saveStatus.className = 'saveStatus'; saveStatus.textContent = '已保存'
     const saveBtn = document.createElement('button'); saveBtn.className = 'saveBtn'; saveBtn.disabled = true; saveBtn.textContent = '保存'
-    const pluginBtn = document.createElement('button'); pluginBtn.className = 'viewModeBtn pluginBtn'; pluginBtn.textContent = '🧩'; pluginBtn.title = '插件命令'
-    pluginBtn.addEventListener('click', (e) => showPluginMenu(e.clientX, e.clientY))
-    header.append(typeBadge, title, viewModeBtn, backlinksBtn, fileMeta, saveStatus, saveBtn, pluginBtn)
+    header.append(typeBadge, title, viewModeBtn, backlinksBtn, fileMeta, saveStatus, saveBtn)
 
     const empty = document.createElement('div'); empty.className = 'pane-empty hidden'; empty.textContent = '点击左侧文件在此打开'
     const editor = document.createElement('textarea'); editor.className = 'editor'; editor.spellcheck = false; editor.wrap = 'off'
@@ -158,7 +155,7 @@ function createPaneDom() {
     previewContent.addEventListener('click', handlePreviewClick)
 
     return {
-        pane, title, typeBadge, viewModeBtn, backlinksBtn, fileMeta, saveStatus, saveBtn, pluginBtn,
+        pane, title, typeBadge, viewModeBtn, backlinksBtn, fileMeta, saveStatus, saveBtn,
         editor, liveEditor, previewPane, previewContent, backlinksPanel, backlinksList: list,
         backlinksClose: close, empty,
     }
@@ -171,7 +168,6 @@ function onEditorInput(paneIndex) {
     tab.content = paneEls(paneIndex).editor.value
     updateSaveStatus(paneIndex)
     renderTabs()
-    if (paneIndex === state.activePane) renderOutline()   // G：大纲随输入刷新
 }
 
 // ================================================================
@@ -272,168 +268,6 @@ window.confirm = (message) =>
 window.alert = (message) =>
     openModal({ title: '提示', message, showCancel: false, okText: '知道了' })
 
-// 轻量通知（插件 showNotice 等）：右下角自动消失，不打断操作
-let noticeTimer = null
-function showNotice(msg) {
-    let el = document.getElementById('appNotice')
-    if (!el) {
-        el = document.createElement('div')
-        el.id = 'appNotice'
-        el.className = 'appNotice'
-        document.body.appendChild(el)
-    }
-    el.textContent = String(msg)
-    el.classList.add('show')
-    clearTimeout(noticeTimer)
-    noticeTimer = setTimeout(() => el.classList.remove('show'), 2600)
-}
-
-// ================================================================
-// 插件系统（#14）：注入 PluginManager 的 API 实现 + 命令面板/设置联动
-// ================================================================
-PluginManager.api = {
-    showNotice: (msg) => showNotice(msg),
-    getCurrentFile: () => {
-        const f = state.currentFile
-        if (!f || !f.path) return null
-        return { path: f.path, name: f.name, content: f.content }
-    },
-    getWorkspace: () => ({ path: state.rootPath }),
-    openFile: async (p) => {
-        if (!p) throw new Error('openFile: 路径为空')
-        await openFileByPath(String(p))
-    },
-    readFile: async (p) => {
-        const r = await window.electronAPI.readFile(String(p))
-        if (!r.ok) throw new Error(r.error || '读取失败')
-        return r.content
-    },
-    writeFile: async (p, c) => {
-        const r = await window.electronAPI.writeFile(String(p), String(c))
-        if (!r.ok) throw new Error(r.error || '写入失败')
-    },
-    readDir: async (p) => {
-        const r = await window.electronAPI.readDir(String(p))
-        if (!r.ok) throw new Error(r.error || '读取目录失败')
-        return r.items
-    },
-    // 在活动编辑器光标处插入文本（插件商店：emoji / 日期等）
-    insertAtCursor: (text) => {
-        if (!state.currentFile) throw new Error('没有打开的文件')
-        pluginInsertText(String(text))
-    },
-    log: (...args) => console.log('[plugin]', ...args),
-}
-
-// —— 插件插入（#14 商店）：在活动编辑器当前光标处插入文本，任何模式都可见 ——
-// 关键：不依赖陈旧的 ctxSelStart/ctxSelEnd（那只在右键菜单时更新）。
-// - 实时模式（liveEditor，Markdown 默认）：DOM 选区 → 源文本偏移（.blk 的 data-s 行号 + 块内偏移）
-// - 文本框模式：直接用 textarea.selectionStart/End
-// 插入后同步 f.content + 各面板 textarea + 重渲染 liveEditor。
-
-// liveEditor DOM 光标 → 源文本字符偏移
-function liveCursorToSourcePos(P, sel, norm) {
-    let node = sel.anchorNode
-    let blk = null
-    while (node && node !== P.liveEditor) {
-        if (node.nodeType === 1 && node.classList && node.classList.contains('blk') && node.hasAttribute('data-s')) {
-            blk = node
-            break
-        }
-        node = node.parentNode
-    }
-    if (!blk) return -1
-    const s = parseInt(blk.dataset.s, 10) || 0   // data-s = 块起始行号（0-based）
-    const lines = norm.split('\n')
-    let blockStart = 0
-    for (let i = 0; i < s && i < lines.length; i++) blockStart += lines[i].length + 1
-    let inner = 0
-    try {
-        const range = document.createRange()
-        range.setStart(blk, 0)
-        range.setEnd(sel.anchorNode, sel.anchorOffset)
-        inner = range.toString().length
-    } catch { inner = 0 }
-    return Math.min(blockStart + inner, norm.length)
-}
-
-function pluginInsertText(text) {
-    const f = state.currentFile
-    if (!f || !f.path) { showNotice('请先打开一个文件'); return }
-    // 正在块编辑（liveEditor 就地 textarea）时先提交，避免插入丢失
-    if (liveEditingBlk && document.body.contains(liveEditingBlk)) commitBlockEdit(liveEditingBlk)
-    const P = curPaneEls()
-    const norm = f.content.replace(/\r\n/g, '\n')
-    const isLive = P.liveEditor && !P.liveEditor.classList.contains('hidden')
-    let pos = norm.length   // 兜底：插到末尾
-    if (isLive) {
-        if (lastCaretPos >= 0 && lastCaretPos <= norm.length) {
-            pos = lastCaretPos   // 最近真实光标优先（块编辑/点击时记录；blur 后的假 selection 不可信）
-        } else {
-            const sel = window.getSelection()
-            if (sel && sel.anchorNode && P.liveEditor.contains(sel.anchorNode)) {
-                const mapped = liveCursorToSourcePos(P, sel, norm)
-                if (mapped >= 0) pos = mapped
-            }
-        }
-    } else if (P.editor && !P.editor.classList.contains('hidden')) {
-        pos = Math.min(P.editor.selectionStart, norm.length)
-        lastCaretPos = pos
-    }
-    const ins = String(text)
-    f.content = norm.slice(0, pos) + ins + norm.slice(pos)
-    // 同步所有面板里打开同一文件的 textarea（保持数据一致）
-    for (let i = 0; i < state.panes.length; i++) {
-        const pEls = paneEls(i)
-        const pane = state.panes[i]
-        const tab = state.tabs.find((t) => t.id === pane.tabId)
-        if (tab && pEls.editor && pEls.editor.value !== undefined) pEls.editor.value = f.content
-    }
-    updateSaveStatus(state.activePane)
-    renderTabs()
-    if (isLive) {
-        renderLiveEditor(state.activePane)
-        // 尽量把光标滚到插入位置附近（找到插入文本所在块）
-        const posLine = f.content.slice(0, pos + ins.length).split('\n').length
-        const newBlk = P.liveEditor.querySelector('.blk[data-s="' + (posLine - 1) + '"]')
-        if (newBlk) newBlk.scrollIntoView({ block: 'nearest' })
-    }
-    if (state.activePane === state.panes.findIndex((p) => p.tabId === f.id)) renderOutline()
-    showNotice('已插入')
-}
-
-// 插件命令列表变化 → 刷新命令面板过滤结果 + 设置面板插件信息
-PluginManager._onChange = () => {
-    renderCommands(els.cpInput ? els.cpInput.value : '')
-    updatePluginInfo()
-}
-
-function updatePluginInfo() {
-    if (!els.setPluginInfo) return
-    const cmds = PluginManager.commands()
-    const names = PluginManager._iframes.map((f) => f.name).join('、')
-    els.setPluginInfo.textContent = names
-        ? '已加载：' + names + '（' + cmds.length + ' 个命令）'
-        : '未加载插件（用户目录 plugins/ 或工作区 .emerald/plugins/ 下放 .js 脚本）'
-}
-
-// 插件加载入口：进入/刷新工作区时调用
-async function loadPluginsForWorkspace() {
-    await PluginManager.load(state.rootPath || null)
-}
-
-// 全局重载（插件商店安装/卸载后调用）
-window.reloadPlugins = () => {
-    PluginManager.load(state.rootPath || null)
-}
-
-// 编辑器头部 🧩 按钮：弹出插件命令菜单（作用于活动面板）
-function showPluginMenu(x, y) {
-    const items = PluginManager.commands().map((c) => ({ label: c.label, action: () => PluginManager.runCommand(c) }))
-    if (!items.length) { showNotice('未加载插件命令（设置 → 插件商店 安装）'); return }
-    showContextMenu(x, y, items)
-}
-
 // currentFile 由 tabs + activeTabId 推导，不单独存一份（单一数据源）
 Object.defineProperty(state, 'currentFile', {
     get() {
@@ -482,7 +316,6 @@ const els = {
     fileMeta: $('fileMeta'),
     saveStatus: $('saveStatus'),
     saveBtn: $('saveBtn'),
-    pluginBtn: $('pluginBtn'),
     viewModeBtn: $('viewModeBtn'),
     previewPane: $('previewPane'),
     previewContent: $('previewContent'),
@@ -576,31 +409,6 @@ const els = {
     aiCfgCancel: $('aiCfgCancel'),
     aiCfgOk: $('aiCfgOk'),
     dropOverlay: $('dropOverlay'),
-    splitDropHint: $('splitDropHint'),
-    graphBtn: $('graphBtn'),
-    graphPanel: $('graphPanel'),
-    graphStats: $('graphStats'),
-    graphRefreshBtn: $('graphRefreshBtn'),
-    graphCloseBtn: $('graphCloseBtn'),
-    graphCanvas: $('graphCanvas'),
-    graphHint: $('graphHint'),
-    graphEmpty: $('graphEmpty'),
-    graphLoading: $('graphLoading'),
-    sidebarResizer: $('sidebarResizer'),
-    outlineSection: $('outlineSection'),
-    settingsBtn: $('settingsBtn'),
-    settingsOverlay: $('settingsOverlay'),
-    setThemeMode: $('setThemeMode'),
-    setSortMode: $('setSortMode'),
-    setClearRecentFolders: $('setClearRecentFolders'),
-    setClearRecentFiles: $('setClearRecentFiles'),
-    setClearFavorites: $('setClearFavorites'),
-    setClearTags: $('setClearTags'),
-    setExportWorkspace: $('setExportWorkspace'),
-    setPluginInfo: $('setPluginInfo'),
-    setReloadPlugins: $('setReloadPlugins'),
-    setOpenStore: $('setOpenStore'),
-    setOk: $('setOk'),
 }
 
 // ================================================================
@@ -804,12 +612,6 @@ function renderItems(items, container, depth) {
             name.className = 'tree-name'
             name.textContent = item.name
             row.append(icon, name)
-            row.draggable = true   // FIX2：文件行可拖拽（拖到渲染区分屏）
-            row.addEventListener('dragstart', (e) => {
-                if (state.batchMode) { e.preventDefault(); return }
-                e.dataTransfer.setData('application/x-emerald-path', item.path)
-                e.dataTransfer.effectAllowed = 'copy'
-            })
             row.addEventListener('click', () => {
                 if (state.batchMode) { toggleBatchSelect(item, row); return }   // 批量模式：选择
                 selectFile(item, row)
@@ -1123,7 +925,6 @@ function renderAllPanes() {
     els.editorPane.classList.remove('hidden')
     for (let i = 0; i < state.panes.length; i++) renderPane(i)
     syncActiveTabId()
-    renderOutline()   // G：大纲随活动文件刷新
     const f = state.currentFile
     if (f && f.path) {
         loadFileMeta(f.path)
@@ -1428,7 +1229,7 @@ function openBlockEditor(blk) {
     trackBlockCursor(blk, ta)
 }
 
-// 块内光标 → 状态栏行号（全局行 = 块起始行 + 块内偏移）；同时记录源偏移供插件插入
+// 块内光标 → 状态栏行号（全局行 = 块起始行 + 块内偏移）
 function trackBlockCursor(blk, ta) {
     const s = parseInt(blk.dataset.s, 10)
     const upto = ta.value.slice(0, ta.selectionStart)
@@ -1436,17 +1237,6 @@ function trackBlockCursor(blk, ta) {
     state.cursorLine = s + 1 + (nl === -1 ? 0 : upto.slice(0, nl).split('\n').length)
     state.cursorCol = ta.selectionStart - nl
     updateStatusBar()
-    // 源偏移：块起始字符 + 块内偏移（即使退出块编辑，插件插入也能定位到这里）
-    if (!isNaN(s)) {
-        const paneIdx = blk.closest('.pane') ? Number(blk.closest('.pane').dataset.pane) : state.activePane
-        const tab = state.tabs.find((t) => t.id === state.panes[paneIdx].tabId)
-        if (tab && typeof tab.content === 'string') {
-            const lines = tab.content.split('\n')
-            let start = 0
-            for (let i = 0; i < s; i++) start += (lines[i] || '').length + 1
-            lastCaretPos = start + ta.selectionStart
-        }
-    }
 }
 
 // 提交块编辑：把块的行区间替换成新内容 → 重渲染并滚回原位
@@ -1469,7 +1259,6 @@ function commitBlockEdit(blk) {
     f.content = lines.slice(0, s).concat(replacement, lines.slice(e + 1)).join('\n')
     updateSaveStatus(paneIdx)
     renderTabs()
-    if (paneIdx === state.activePane) renderOutline()   // G：大纲随块编辑刷新
     // 重渲染并滚回该块位置，闪烁提示
     const P = paneEls(paneIdx)
     const scrollTop = P.liveEditor.scrollTop
@@ -1645,7 +1434,6 @@ async function toggleTaskLine(cb) {
     }
     f.originalContent = content // 已落盘，刷新"未保存"基线
     updateSaveStatus(paneIdx)
-    if (paneIdx === state.activePane) renderOutline()
     renderTabs()
 }
 
@@ -1783,7 +1571,6 @@ function hideAllStates() {
     els.blankHint.classList.add('hidden')
     els.gitPanel.classList.add('hidden')
     els.aiPanel.classList.add('hidden')
-    closeGraph()   // 知识图谱（#13）：关闭并停止模拟
     currentPdfPath = null
 }
 
@@ -2074,7 +1861,6 @@ async function loadRoot() {
     maybeShowGuide()   // B4：首次使用引导条
     await loadTags()   // 标签索引随工作区一起加载（.emerald/index.json）
     await loadGitStatus()   // Git 状态随工作区加载（树徽章）
-    await loadPluginsForWorkspace()   // 插件随工作区加载（#14）
 }
 
 // B4：首次使用引导条——只在首次进入工作区时显示一次，关闭后记住
@@ -2171,7 +1957,6 @@ function showItemContextMenu(x, y, item) {
 // 右键时记住的选区（菜单弹出会让 textarea 失焦，用这个保住原始选区）
 let ctxSelStart = 0
 let ctxSelEnd = 0
-let lastCaretPos = -1   // 最后光标源偏移（实时跟踪，插件插入兜底；块编辑/文本框都更新）
 
 // 表格模板（插入时用）
 const TABLE_SNIPPET = '\n| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n| 内容 | 内容 | 内容 |\n'
@@ -2257,11 +2042,6 @@ function showEditorContextMenu(x, y) {
     if (ctxSelEnd > ctxSelStart) {
         items.push({ label: '🤖 用选中文字问 AI（' + (ctxSelEnd - ctxSelStart) + ' 字符）', action: askAiSelection })
     }
-    // 插件命令子菜单（#14 商店）：动态列出已加载插件
-    const pluginCmds = PluginManager.commands()
-    if (pluginCmds.length) {
-        items.push({ label: '🧩 插件命令', submenu: pluginCmds.map((c) => ({ label: c.label, action: () => PluginManager.runCommand(c) })) })
-    }
     items.push(
         { label: '📥 插入', submenu: insert },
         { label: '🔗 插入链接', action: () => insertLink() },
@@ -2279,24 +2059,19 @@ function askAiSelection() {
     openAiPanel(true)   // 跳过重复捕获（用已保存的选区）
 }
 
-// 所见即所得模式右键：有渲染选区时提供"用选中文字问 AI"，另附插件命令子菜单
+// 所见即所得模式右键：有渲染选区时提供"用选中文字问 AI"
 function handleLiveEditorCtxMenu(e) {
     e.preventDefault()
     e.stopPropagation()
-    const items = []
     const sel = window.getSelection()
-    if (sel && sel.toString().trim() && e.currentTarget.contains(sel.anchorNode)) {
-        items.push({ label: '🤖 用选中文字问 AI（' + sel.toString().length + ' 字符）', action: () => {
+    if (!sel || !sel.toString().trim() || !e.currentTarget.contains(sel.anchorNode)) return
+    showContextMenu(e.clientX, e.clientY, [
+        { label: '🤖 用选中文字问 AI（' + sel.toString().length + ' 字符）', action: () => {
             aiSel = null
             aiSelText = sel.toString()
             openAiPanel(true)
-        } })
-    }
-    const pluginCmds = PluginManager.commands()
-    if (pluginCmds.length) {
-        items.push({ label: '🧩 插件命令', submenu: pluginCmds.map((c) => ({ label: c.label, action: () => PluginManager.runCommand(c) })) })
-    }
-    if (items.length) showContextMenu(e.clientX, e.clientY, items)
+        } },
+    ])
 }
 els.liveEditor.addEventListener('contextmenu', handleLiveEditorCtxMenu)
 
@@ -3178,10 +2953,6 @@ const COMMANDS = [
     { id: 'tags.edit', label: '为当前文件编辑标签', when: () => !!state.currentFile, run: () => editTagsFor(state.currentFile.path, state.currentFile.name, false) },
     { id: 'tags.clearFilter', label: '清除标签筛选', when: () => !!state.activeTag, run: () => { state.activeTag = null; renderTags(); renderTagFilter() } },
     { id: 'ai.open', label: '打开 AI 助手', run: openAiPanel },
-    { id: 'graph.open', label: '打开知识图谱', when: () => !!state.rootPath, run: openGraph },
-    { id: 'plugins.reload', label: '重新加载插件', when: () => !!state.rootPath, run: () => { PluginManager.load(state.rootPath); showNotice('插件已重新加载') } },
-    { id: 'plugins.store', label: '打开插件商店', run: () => window.PluginStore.open() },
-    { id: 'app.settings', label: '设置', run: openSettings },
 ]
 
 let cpFiltered = []   // 当前过滤后的命令
@@ -3198,17 +2969,10 @@ function closeCommandPalette() {
     els.commandPalette.classList.add('hidden')
 }
 
-// 过滤 + 渲染命令列表（label 匹配关键词）；插件命令动态合并（#14）
+// 过滤 + 渲染命令列表（label 匹配关键词）
 function renderCommands(q) {
     const query = (q || '').toLowerCase()
-    const pluginCmds = PluginManager.commands().map((c) => ({
-        id: 'plugin.' + c.id,
-        label: '🧩 ' + c.label,
-        pluginCmd: c,
-        run: () => PluginManager.runCommand(c),
-    }))
-    cpFiltered = COMMANDS.concat(pluginCmds)
-        .filter((c) => (!c.when || c.when()) && c.label.toLowerCase().includes(query))
+    cpFiltered = COMMANDS.filter((c) => (!c.when || c.when()) && c.label.toLowerCase().includes(query))
     cpIndex = 0
     els.cpResults.innerHTML = ''
     cpFiltered.forEach((c, i) => {
@@ -3254,37 +3018,19 @@ els.cpInput.addEventListener('keydown', (e) => {
 })
 
 // ================================================================
-// 主题切换（C：亮色 / 暗色 / 跟随系统）
+// 主题切换
 // ================================================================
 
-const THEME_MODE_KEY = 'emerald-theme-mode'
-
-// 计算有效主题：跟随系统时读 prefers-color-scheme
-function effectiveTheme() {
-    if (state.themeMode === 'system') {
-        return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-    }
-    return state.themeMode === 'dark' ? 'dark' : 'light'
-}
-
-function applyTheme(mode) {
-    state.themeMode = mode || state.themeMode || 'light'
-    const eff = effectiveTheme()
-    state.theme = eff
+function applyTheme(theme) {
     // 日月图标显隐由 CSS（:root[data-theme]）处理，这里只切主题变量
-    document.documentElement.dataset.theme = eff
+    document.documentElement.dataset.theme = theme
 }
 
-// 手动切换 = 切到当前有效主题的反面，并转为手动模式
 function toggleTheme() {
-    applyTheme(effectiveTheme() === 'dark' ? 'light' : 'dark')
-    localStorage.setItem(THEME_MODE_KEY, state.themeMode)
+    state.theme = state.theme === 'dark' ? 'light' : 'dark'
+    localStorage.setItem('emerald-theme', state.theme)
+    applyTheme(state.theme)
 }
-
-// 系统主题变化时自动跟随
-window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-    if (state.themeMode === 'system') applyTheme('system')
-})
 
 // ================================================================
 // 状态栏
@@ -3296,15 +3042,11 @@ function updateStatusBar() {
         els.statusLeft.textContent = '📄 ' + f.path
         els.statusCenter.textContent = state.tabs.length + ' 个标签 · '
             + (state.viewMode === 'preview' ? '👁 预览' : '✏️ 编辑')   // F1：模式图标
-        // B：字数统计（字符数 / 行数）
-        const totalLines = f.content.split('\n').length
-        els.statusRight.textContent = '行 ' + state.cursorLine + ' · 列 ' + state.cursorCol
-            + ' · ' + f.content.length + ' 字符 · ' + totalLines + ' 行 · UTF-8'
     } else {
         els.statusLeft.textContent = '就绪'
         if (state.rootPath) els.statusCenter.textContent = els.statusCenter.textContent || '工作区已打开'
-        els.statusRight.textContent = '行 ' + state.cursorLine + ' · 列 ' + state.cursorCol + ' · UTF-8'
     }
+    els.statusRight.textContent = '行 ' + state.cursorLine + ' · 列 ' + state.cursorCol + ' · UTF-8'
 }
 
 // 光标位置跟踪（文本编辑时实时刷新状态栏右段，作用于活动面板文本框）
@@ -3312,7 +3054,6 @@ function updateCursorPos() {
     const el = curEditor()
     if (!el) return
     const pos = el.selectionStart
-    lastCaretPos = pos   // 记录源偏移（供插件插入定位）
     const upto = el.value.slice(0, pos)
     const nl = upto.lastIndexOf('\n')
     state.cursorLine = nl === -1 ? 1 : upto.split('\n').length
@@ -4015,10 +3756,7 @@ async function saveAiSettings() {
     aiAppendMessage('assistant', '✓ 配置已保存（' + cfg.provider + ' · ' + cfg.model + '）', false)
 }
 
-// 用 mousedown 捕获选区：点击按钮的默认行为会先清空 DOM 选区（live 模式），
-// 等 click 再捕获就只剩"完整内容"了。mousedown 时选区还在，click 直接打开面板。
-els.aiBtn.addEventListener('mousedown', () => captureAiSelection())
-els.aiBtn.addEventListener('click', () => openAiPanel(true))
+els.aiBtn.addEventListener('click', () => openAiPanel())
 els.aiCloseBtn.addEventListener('click', closeAiPanel)
 els.aiSettingsBtn.addEventListener('click', openAiSettings)
 els.aiCfgCancel.addEventListener('click', () => els.aiSettingsOverlay.classList.add('hidden'))
@@ -4046,69 +3784,28 @@ els.aiCtxBtn.addEventListener('click', () => {
 // ================================================================
 
 let dragDepth = 0   // dragenter/leave 成对计数，避免子元素抖动
-let splitHintDepth = 0   // 渲染区分屏阴影的 enter/leave 计数（拖回目录栏时正确收起）
-
-// -webkit-app-region: drag 的区域（顶栏 / 标签栏 / 启动屏顶部拖动条）会被 OS 层拦截拖放：
-// 文件悬停其上时 Web 的 dragover 不触发 → 显示禁止符号且无法 drop。
-// 修复：拖拽文件期间临时切成 no-drag，结束恢复 drag（窗口仍可拖动）。
-// 启动屏主体（launchScreen）已不在 drag 区域（index.html），保证拖入畅通。
-const DRAG_REGION_SELECTOR = '.labelNav, .topNav, .launchDragBar'
-function setDragRegions(enabled) {
-    document.querySelectorAll(DRAG_REGION_SELECTOR).forEach((el) => {
-        el.style.webkitAppRegion = enabled ? 'drag' : 'no-drag'
-    })
-}
-
-// 判断拖入内容是否可能是文件（Files 或 text/uri-list，如从压缩包管理器拖出）
-function dropHasFiles(dt) {
-    if (!dt) return false
-    const types = [...dt.types]
-    return types.includes('Files') || types.includes('text/uri-list')
-}
 
 document.addEventListener('dragenter', (e) => {
-    if (!dropHasFiles(e.dataTransfer)) return
+    if (!e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return
     dragDepth++
-    setDragRegions(false)   // 文件拖入窗口：临时放开 drag region，让全窗口可放置
     els.dropOverlay.classList.add('show')
 })
 document.addEventListener('dragover', (e) => {
-    // 无条件 preventDefault（只要有任何拖拽数据）：
-    // 否则 Electron 可能把窗口导航到被拖的文件（尤其 types 为 text/uri-list 时）
-    if (e.dataTransfer) e.preventDefault()
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+    // 必须 preventDefault，否则 Electron 会把文件导航成网页
+    if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) e.preventDefault()
 })
 document.addEventListener('dragleave', () => {
     dragDepth = Math.max(0, dragDepth - 1)
-    if (dragDepth === 0) {
-        setDragRegions(true)   // 拖拽完全离开窗口：恢复窗口拖动能力
-        els.dropOverlay.classList.remove('show')
-        els.splitDropHint.classList.add('hidden')   // 拖拽完全离开窗口时也收起分屏阴影
-    }
+    if (dragDepth === 0) els.dropOverlay.classList.remove('show')
 })
 document.addEventListener('drop', async (e) => {
     e.preventDefault()
     dragDepth = 0
-    splitHintDepth = 0
-    setDragRegions(true)   // 释放后恢复窗口拖动能力
     els.dropOverlay.classList.remove('show')
-    els.splitDropHint.classList.add('hidden')   // 在窗口任意位置（含目录栏）释放都收起阴影
-    const dt = e.dataTransfer
-    if (!dt) return
-    // 1) 优先 dataTransfer.files（真实文件拖放）
-    if (dt.files && dt.files.length) {
-        for (const file of dt.files) {
-            let p = ''
-            try { p = window.electronAPI.getPathForFile(file) } catch { p = '' }
-            if (p) await openDroppedPath(p)
-        }
-        return
-    }
-    // 2) 兜底：text/uri-list / text/plain 里的 file:// URL（某些应用拖出时没有 File 对象）
-    const uriText = dt.getData('text/uri-list') || dt.getData('text/plain') || ''
-    const uris = uriText.split('\n').map((s) => s.trim()).filter((s) => s && /^file:\/\//i.test(s))
-    for (const uri of uris) {
-        const p = decodeURIComponent(uri.replace(/^file:\/\/\//i, '')).split('/').join('\\')
+    const files = e.dataTransfer && e.dataTransfer.files
+    if (!files || !files.length) return
+    for (const file of files) {
+        const p = window.electronAPI.getPathForFile(file)
         if (p) await openDroppedPath(p)
     }
 })
@@ -4130,593 +3827,10 @@ async function openDroppedPath(p) {
 }
 
 // ================================================================
-// 设置面板（D）：主题 / 默认排序 / 清理数据
-// ================================================================
-
-function openSettings() {
-    els.setThemeMode.value = state.themeMode || 'light'
-    els.setSortMode.value = state.sortMode || 'name'
-    els.settingsOverlay.classList.remove('hidden')
-}
-
-function closeSettings() {
-    els.settingsOverlay.classList.add('hidden')
-}
-
-els.settingsBtn.addEventListener('click', openSettings)
-els.setOk.addEventListener('click', closeSettings)
-els.settingsOverlay.addEventListener('click', (e) => {
-    if (e.target === els.settingsOverlay) closeSettings()
-})
-
-// 主题档位切换：立即生效并记住
-els.setThemeMode.addEventListener('change', () => {
-    applyTheme(els.setThemeMode.value)
-    localStorage.setItem(THEME_MODE_KEY, state.themeMode)
-})
-
-// 默认排序：立即重排并记住
-els.setSortMode.addEventListener('change', () => {
-    state.sortMode = els.setSortMode.value
-    localStorage.setItem('emerald-sort-mode', state.sortMode)
-    if (state.rootPath) resortTree()
-})
-
-// 清理数据
-els.setClearRecentFolders.addEventListener('click', () => {
-    localStorage.removeItem(RECENT_KEY)
-    renderRecentFolders()
-    alert('已清空最近文件夹')
-})
-els.setClearRecentFiles.addEventListener('click', () => {
-    localStorage.removeItem(RECENT_FILES_KEY)
-    renderRecentFiles()
-    alert('已清空最近文件')
-})
-els.setClearFavorites.addEventListener('click', () => {
-    localStorage.removeItem(FAV_KEY)
-    renderFavorites()
-    alert('已清空收藏')
-})
-els.setClearTags.addEventListener('click', async () => {
-    if (!state.rootPath) { alert('当前没有打开的工作区'); return }
-    state.tags = {}
-    await saveTags()
-    renderTags()
-    updateTreeBadges()
-    alert('已清空当前工作区标签')
-})
-
-// H：导出工作区备份（.emerald 索引 + 文件清单）
-els.setExportWorkspace.addEventListener('click', async () => {
-    if (!state.rootPath) { alert('当前没有打开的工作区'); return }
-    const pick = await window.electronAPI.selectFolder()
-    if (!pick.ok || pick.canceled) return
-    const destDir = joinPath(pick.path, basename(state.rootPath) + '-backup')
-    const exp = await window.electronAPI.exportWorkspace(state.rootPath, destDir)
-    if (!exp.ok) { alert('导出失败：' + (exp.error || '')); return }
-    alert('✅ 已导出 ' + exp.count + ' 个文件到：\n' + exp.dest + (exp.hasIndex ? '\n（含标签索引）' : ''))
-})
-
-// ================================================================
-// 侧边栏宽度拖拽（F）
-// ================================================================
-
-const SIDEBAR_W_KEY = 'emerald-sidebar-w'
-let sidebarDrag = null   // { startX, startW }
-
-function applySidebarWidth(w) {
-    const el = document.querySelector('.catalogueContainer')
-    if (!el) return
-    el.style.flex = 'none'
-    el.style.width = w + 'px'
-}
-
-els.sidebarResizer.addEventListener('mousedown', (e) => {
-    e.preventDefault()
-    const el = document.querySelector('.catalogueContainer')
-    sidebarDrag = { startX: e.clientX, startW: el.getBoundingClientRect().width }
-    els.sidebarResizer.classList.add('dragging')
-})
-document.addEventListener('mousemove', (e) => {
-    if (!sidebarDrag) return
-    const w = Math.max(220, Math.min(560, sidebarDrag.startW + (e.clientX - sidebarDrag.startX)))
-    applySidebarWidth(w)
-})
-document.addEventListener('mouseup', () => {
-    if (!sidebarDrag) return
-    const w = Math.round(document.querySelector('.catalogueContainer').getBoundingClientRect().width)
-    localStorage.setItem(SIDEBAR_W_KEY, String(w))
-    sidebarDrag = null
-    els.sidebarResizer.classList.remove('dragging')
-})
-
-// 初始化：应用保存过的宽度
-;(function () {
-    const savedW = parseInt(localStorage.getItem(SIDEBAR_W_KEY) || '', 10)
-    if (savedW) applySidebarWidth(savedW)
-})()
-
-// ================================================================
-// 大纲侧边栏（G）：当前 Markdown 的标题列表，点击跳转
-// ================================================================
-
-function extractOutline(mdText) {
-    return String(mdText || '').split('\n').map((line, i) => {
-        const m = /^(#{1,3})\s+(.+)$/.exec(line)
-        if (!m) return null
-        return { level: m[1].length, text: m[2].trim().replace(/[ \t]+#+$/, ''), line: i }
-    }).filter(Boolean)
-}
-
-function renderOutline() {
-    if (!els.outlineSection) return
-    const f = state.currentFile
-    const items = (f && f.path && isMarkdown(f.name)) ? extractOutline(f.content) : []
-    els.outlineSection.innerHTML = ''
-    if (!items.length) {
-        els.outlineSection.classList.add('hidden')
-        return
-    }
-    els.outlineSection.classList.remove('hidden')
-    const title = document.createElement('div')
-    title.className = 'fav-title'
-    title.textContent = '📑 大纲'
-    els.outlineSection.appendChild(title)
-    items.forEach((it) => {
-        const item = document.createElement('div')
-        item.className = 'outline-item l' + it.level
-        item.textContent = it.text
-        item.title = '第 ' + (it.line + 1) + ' 行'
-        item.addEventListener('click', () => {
-            revealLine(it.line + 1)   // 实时模式滚动+闪烁；文本框模式选区定位
-        })
-        els.outlineSection.appendChild(item)
-    })
-}
-
-// ================================================================
-// FIX2：从目录树拖文件到渲染区 → 分屏预览（右侧绿色阴影）+ 分屏打开
-// ================================================================
-
-const mainRenderEl = document.querySelector('.mainRender')
-
-mainRenderEl.addEventListener('dragenter', (e) => {
-    if (!e.dataTransfer || ![...e.dataTransfer.types].includes('application/x-emerald-path')) return
-    e.preventDefault()
-    splitHintDepth++
-    els.splitDropHint.classList.remove('hidden')
-})
-mainRenderEl.addEventListener('dragover', (e) => {
-    if (!e.dataTransfer || ![...e.dataTransfer.types].includes('application/x-emerald-path')) return
-    e.preventDefault()
-    els.splitDropHint.classList.remove('hidden')
-})
-mainRenderEl.addEventListener('dragleave', () => {
-    // 计数法：enter/leave 成对，离开最后一个子元素时才真正离开渲染区（不再依赖 e.target 判断）
-    splitHintDepth = Math.max(0, splitHintDepth - 1)
-    if (splitHintDepth === 0) els.splitDropHint.classList.add('hidden')
-})
-mainRenderEl.addEventListener('drop', (e) => {
-    const p = e.dataTransfer && e.dataTransfer.getData('application/x-emerald-path')
-    splitHintDepth = 0
-    els.splitDropHint.classList.add('hidden')
-    if (!p) return
-    e.preventDefault()
-    e.stopPropagation()   // 不冒泡到 document 的文件拖放处理
-    splitPane()           // 新面板成为活动面板（右侧）
-    openFileByPath(p)     // 文件打开在新分屏面板
-})
-
-// ================================================================
-// 知识图谱（#13）：wikilink 力导向布局 + 孤岛检测，Canvas 渲染
-// ================================================================
-
-let graphData = null            // { nodes: [{rel,name}], links: [{from,to}] }
-let graphPos = null             // Float64Array 节点世界坐标 [x0,y0,x1,y1,...]
-let graphVel = null             // Float64Array 速度
-let graphDeg = null             // Int32Array 节点度（入+出）
-let graphFixed = new Set()      // 被用户拖住固定的节点下标
-let graphSimSteps = 0           // 已迭代步数
-let graphSimDone = false        // 布局收敛 / 达上限
-let graphView = { scale: 1, tx: 0, ty: 0 }   // 屏幕变换：screen = world * scale + t
-let graphRAF = null
-let graphDrag = null            // { idx, moved, lastX, lastY }
-let graphPan = null             // 空白处拖动平移 { lastX, lastY }
-let graphHover = -1             // 悬停节点（高亮）
-
-// 图谱物理参数（Obsidian 式松弛感：邻居柔和跟随、收敛平滑）
-const GRAPH_MAX_STEPS = 800
-const GRAPH_REST = 170          // 弹簧目标距离（px，拉开间距，线更长更舒展）
-const GRAPH_K_SPRING = 0.06     // 弹簧刚度（拖拽时临时增强，邻居跟随明显但柔和）
-const GRAPH_K_REP = 4200        // 斥力强度（拉开节点间距）
-const GRAPH_K_CENTER = 0.01     // 向心力（弱一点，允许图自然扩散）
-const GRAPH_DAMP = 0.85         // 速度阻尼（更高 → 运动更平滑、无抖动）
-const GRAPH_STEPS_FRAME = 4     // 常态每帧物理步数
-const GRAPH_STEPS_FRAME_DRAG = 8    // 拖拽时每帧物理步数（柔和跟随）
-
-function openGraph() {
-    if (!state.rootPath) { alert('请先打开一个工作区'); return }
-    hideAllStates()
-    els.graphPanel.classList.remove('hidden')
-    loadGraph()
-}
-
-function closeGraph() {
-    if (graphRAF) { cancelAnimationFrame(graphRAF); graphRAF = null }
-    graphDrag = null
-    graphPan = null
-    graphData = null
-    els.graphPanel.classList.add('hidden')
-}
-
-// 重新扫描：从主进程拿节点/边，构建模拟数据并启动布局
-async function loadGraph() {
-    els.graphLoading.classList.remove('hidden')
-    els.graphEmpty.classList.add('hidden')
-    els.graphStats.textContent = ''
-    const res = await window.electronAPI.scanLinks(state.rootPath)
-    els.graphLoading.classList.add('hidden')
-    if (!res.ok) {
-        els.graphEmpty.textContent = '扫描失败：' + (res.error || '未知错误')
-        els.graphEmpty.classList.remove('hidden')
-        return
-    }
-    const nodes = res.nodes || []
-    if (!nodes.length) {
-        els.graphEmpty.textContent = '当前工作区没有 Markdown 笔记，写几篇并用 [[双向链接]] 连接它们吧'
-        els.graphEmpty.classList.remove('hidden')
-        return
-    }
-    // 边去重（一对文件只算一条边）
-    const seen = new Set()
-    const links = (res.links || []).filter((l) => {
-        const k = l.from < l.to ? l.from + '\u0000' + l.to : l.to + '\u0000' + l.from
-        if (seen.has(k)) return false
-        seen.add(k)
-        return true
-    })
-    graphData = { nodes, links, truncated: !!res.truncated }
-    const n = nodes.length
-    graphPos = new Float64Array(n * 2)
-    graphVel = new Float64Array(n * 2)
-    graphDeg = new Int32Array(n)
-    graphFixed = new Set()
-    graphSimSteps = 0
-    graphSimDone = false
-    graphView = { scale: 1, tx: 0, ty: 0 }
-    // 初始位置：环形展开（比随机更稳定），再叠加小扰动
-    const cx = 0, cy = 0
-    const R = Math.max(120, n * 9)
-    nodes.forEach((nd, i) => {
-        const ang = (i / Math.max(1, n)) * Math.PI * 2
-        graphPos[i * 2] = cx + Math.cos(ang) * R + (Math.random() - 0.5) * 30
-        graphPos[i * 2 + 1] = cy + Math.sin(ang) * R + (Math.random() - 0.5) * 30
-    })
-    // 度统计
-    links.forEach((l) => {
-        const a = idxOfRel(l.from)
-        const b = idxOfRel(l.to)
-        if (a >= 0 && b >= 0) { graphDeg[a]++; graphDeg[b]++ }
-    })
-    // 统计文本
-    const isolated = nodes.filter((_, i) => graphDeg[i] === 0).length
-    els.graphStats.textContent = nodes.length + ' 笔记 · ' + links.length + ' 链接'
-        + (isolated ? ' · 孤立 ' + isolated : '') + (res.truncated ? '（超 400 笔记已截断）' : '')
-    els.graphEmpty.classList.add('hidden')
-    startGraphSim()
-}
-
-function idxOfRel(rel) {
-    if (!graphData) return -1
-    for (let i = 0; i < graphData.nodes.length; i++) {
-        if (graphData.nodes[i].rel === rel) return i
-    }
-    return -1
-}
-
-// 启动力导向模拟（rAF 驱动，收敛后停止；拖拽节点时继续）
-function startGraphSim() {
-    if (graphRAF) cancelAnimationFrame(graphRAF)
-    const tick = () => {
-        if (!graphSimDone) {
-            const steps = graphDrag ? GRAPH_STEPS_FRAME_DRAG : GRAPH_STEPS_FRAME
-            for (let k = 0; k < steps; k++) stepGraphSim()   // 拖拽时更多步，邻居跟随更快
-            drawGraph()
-        } else {
-            drawGraph()   // 收敛后仍重绘（缩放/平移/拖拽时）
-        }
-        graphRAF = requestAnimationFrame(tick)
-    }
-    graphRAF = requestAnimationFrame(tick)
-}
-
-// 物理一步：斥力（O(n²)）+ 弹簧 + 向心 + 阻尼
-function stepGraphSim() {
-    const n = graphData.nodes.length
-    const pos = graphPos, vel = graphVel
-    // 斥力：所有节点对
-    for (let i = 0; i < n; i++) {
-        const xi = pos[i * 2], yi = pos[i * 2 + 1]
-        for (let j = i + 1; j < n; j++) {
-            let dx = xi - pos[j * 2]
-            let dy = yi - pos[j * 2 + 1]
-            let d2 = dx * dx + dy * dy
-            if (d2 < 1) { d2 = 1 }
-            const d = Math.sqrt(d2)
-            const f = GRAPH_K_REP / d2
-            const fx = (dx / d) * f
-            const fy = (dy / d) * f
-            vel[i * 2] += fx; vel[i * 2 + 1] += fy
-            vel[j * 2] -= fx; vel[j * 2 + 1] -= fy
-        }
-    }
-    // 弹簧（有边）+ 向心力；拖拽节点时弹簧刚度临时增强，让邻居明显跟随
-    for (let i = 0; i < n; i++) {
-        const xi = pos[i * 2], yi = pos[i * 2 + 1]
-        vel[i * 2] += -xi * GRAPH_K_CENTER
-        vel[i * 2 + 1] += -yi * GRAPH_K_CENTER
-    }
-    const springK = graphDrag ? GRAPH_K_SPRING * 2 : GRAPH_K_SPRING
-    for (const l of graphData.links) {
-        const a = idxOfRel(l.from)
-        const b = idxOfRel(l.to)
-        if (a < 0 || b < 0) continue
-        const dx = pos[b * 2] - pos[a * 2]
-        const dy = pos[b * 2 + 1] - pos[a * 2 + 1]
-        const d = Math.sqrt(dx * dx + dy * dy) || 1
-        const f = (d - GRAPH_REST) * springK
-        const fx = (dx / d) * f
-        const fy = (dy / d) * f
-        vel[a * 2] += fx; vel[a * 2 + 1] += fy
-        vel[b * 2] -= fx; vel[b * 2 + 1] -= fy
-    }
-    // 积分 + 阻尼（固定节点不动）
-    let energy = 0
-    for (let i = 0; i < n; i++) {
-        if (graphFixed.has(i)) { vel[i * 2] = 0; vel[i * 2 + 1] = 0; continue }
-        vel[i * 2] *= GRAPH_DAMP
-        vel[i * 2 + 1] *= GRAPH_DAMP
-        pos[i * 2] += vel[i * 2]
-        pos[i * 2 + 1] += vel[i * 2 + 1]
-        energy += Math.abs(vel[i * 2]) + Math.abs(vel[i * 2 + 1])
-    }
-    graphSimSteps++
-    if (graphSimSteps >= GRAPH_MAX_STEPS || energy < n * 0.02) {
-        graphSimDone = true
-    }
-}
-
-// 画布与主题色（每次绘制读取，主题切换后自动适配）
-function graphColors() {
-    const css = getComputedStyle(document.documentElement)
-    const acc = (css.getPropertyValue('--accent') || '#10b981').trim()
-    const fg = (css.getPropertyValue('--text') || '#1f2937').trim()
-    const mut = (css.getPropertyValue('--text-muted') || '#6b7280').trim()
-    const bd = (css.getPropertyValue('--border') || '#e5e7eb').trim()
-    return { acc, fg, mut, bd }
-}
-
-function drawGraph() {
-    const canvas = els.graphCanvas
-    const ctx = canvas.getContext('2d')
-    const body = els.graphPanel.querySelector('.graphBody')
-    const W = body.clientWidth, H = body.clientHeight
-    if (!W || !H || !graphData) return
-    const dpr = window.devicePixelRatio || 1
-    if (canvas.width !== W * dpr || canvas.height !== H * dpr) {
-        canvas.width = W * dpr
-        canvas.height = H * dpr
-    }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, W, H)
-    const col = graphColors()
-    const n = graphData.nodes.length
-    const { scale, tx, ty } = graphView
-    // 视口中心：把世界原点投到画布中心
-    const ox = W / 2 - tx, oy = H / 2 - ty
-    const sx = (i) => pos(i, 0) * scale + ox
-    const sy = (i) => pos(i, 1) * scale + oy
-    const pos = (i, axis) => graphPos[i * 2 + axis]
-    // 焦点节点（拖拽或悬停）：Obsidian 式聚焦——它的连线清晰，其余连线大幅变淡
-    const focusIdx = graphDrag ? graphDrag.idx : (graphHover >= 0 ? graphHover : -1)
-    const focusNeighbors = new Set()
-    if (focusIdx >= 0) {
-        for (const l of graphData.links) {
-            const a = idxOfRel(l.from), b = idxOfRel(l.to)
-            if (a === focusIdx) focusNeighbors.add(b)
-            if (b === focusIdx) focusNeighbors.add(a)
-        }
-    }
-    // 边：细线（0.6–1.1px）+ accent 半透明（在背景上凸显）；焦点连线清晰，其余变淡
-    ctx.lineWidth = 1
-    for (const l of graphData.links) {
-        const a = idxOfRel(l.from), b = idxOfRel(l.to)
-        if (a < 0 || b < 0) continue
-        const linked = focusIdx >= 0 && (a === focusIdx || b === focusIdx)
-        const w = Math.min(1.1, 0.6 + (graphDeg[a] + graphDeg[b]) * 0.05)
-        ctx.strokeStyle = col.acc
-        ctx.globalAlpha = linked ? 0.9 : (focusIdx >= 0 ? 0.07 : 0.32)
-        ctx.lineWidth = linked ? Math.min(1.4, w * 1.3) : w
-        ctx.beginPath()
-        ctx.moveTo(sx(a), sy(a))
-        ctx.lineTo(sx(b), sy(b))
-        ctx.stroke()
-    }
-    ctx.globalAlpha = 1
-    ctx.lineWidth = 1
-    // 节点：焦点节点放大 + 光晕；其邻居保持醒目；无关节点变暗
-    const current = state.currentFile ? state.currentFile.path : ''
-    for (let i = 0; i < n; i++) {
-        const x = sx(i), y = sy(i)
-        const deg = graphDeg[i]
-        const r = Math.max(4, Math.min(11, 4.5 + Math.sqrt(deg) * 1.8))
-        const isolated = deg === 0
-        const isCurrent = current.endsWith(graphData.nodes[i].rel.replace(/\//g, '\\')) || current === graphData.nodes[i].rel
-        const focused = i === focusIdx
-        const isNeighbor = focusIdx >= 0 && focusNeighbors.has(i)
-        // 透明度分层：焦点 1.0（+光晕）> 邻居/当前文件 1.0 > 常态 0.9 > 无关节点 0.35
-        let alpha = 0.9
-        if (focused || isNeighbor || isCurrent) alpha = 1
-        else if (focusIdx >= 0) alpha = 0.35
-        const rr = focused ? r * 1.35 : r
-        ctx.beginPath()
-        ctx.arc(x, y, rr, 0, Math.PI * 2)
-        if (focused) {
-            ctx.shadowColor = col.acc
-            ctx.shadowBlur = 14
-        }
-        if (isCurrent) {
-            ctx.fillStyle = col.acc
-        } else if (isolated) {
-            ctx.fillStyle = col.mut
-        } else {
-            ctx.fillStyle = col.acc
-        }
-        ctx.globalAlpha = alpha
-        ctx.fill()
-        ctx.globalAlpha = 1
-        ctx.shadowBlur = 0
-        if (focused || i === graphHover || isCurrent) {
-            ctx.strokeStyle = focused ? '#fff' : col.fg
-            ctx.lineWidth = focused ? 2 : 1.5
-            ctx.stroke()
-            ctx.lineWidth = 1
-        }
-        // 标签：Obsidian 式——字号随缩放动态变小（缩小不覆盖相邻节点），
-        // 接近隐藏阈值时透明度渐隐过渡（scale 0.9 → 全显，0.55 → 完全透明）
-        const labelFade = Math.min(1, Math.max(0, (scale - 0.55) / 0.35))
-        if (labelFade > 0.02) {
-            const fontSize = Math.max(6.5, Math.min(12, 9.5 * scale))   // 更小的字，随缩放动态
-            const label = graphData.nodes[i].name.replace(/\.md$/i, '')
-            ctx.fillStyle = isolated ? col.mut : col.fg
-            let la = 0.9
-            if (focusIdx >= 0 && !focused && !isNeighbor) la = 0.4
-            else if (alpha < 0.5) la = 0.4
-            ctx.globalAlpha = la * labelFade
-            ctx.font = (focused ? 'bold ' : '') + fontSize + 'px "Segoe UI", sans-serif'
-            ctx.textAlign = 'center'
-            ctx.fillText(label, x, y + rr + fontSize + 4)
-            ctx.globalAlpha = 1
-        }
-    }
-}
-
-// —— 交互：拖拽节点 / 平移视图 / 缩放 / 点击打开 / 悬停 ——
-
-function graphHitNode(px, py) {
-    const { scale } = graphView
-    const body = els.graphPanel.querySelector('.graphBody')
-    const W = body.clientWidth, H = body.clientHeight
-    const ox = W / 2 - graphView.tx, oy = H / 2 - graphView.ty
-    for (let i = graphData.nodes.length - 1; i >= 0; i--) {
-        const x = graphPos[i * 2] * scale + ox
-        const y = graphPos[i * 2 + 1] * scale + oy
-        const r = Math.max(5, Math.min(13, 5.5 + Math.sqrt(graphDeg[i]) * 2))
-        if (Math.abs(px - x) <= r + 6 && Math.abs(py - y) <= r + 6) return i
-    }
-    return -1
-}
-
-els.graphCanvas.addEventListener('pointerdown', (e) => {
-    if (!graphData) return
-    e.preventDefault()
-    try { els.graphCanvas.setPointerCapture(e.pointerId) } catch { /* 模拟事件无真实指针 */ }
-    const rect = els.graphCanvas.getBoundingClientRect()
-    const px = e.clientX - rect.left, py = e.clientY - rect.top
-    const idx = graphHitNode(px, py)
-    if (idx >= 0) {
-        graphDrag = { idx, moved: false, lastX: px, lastY: py }
-        graphFixed.add(idx)
-    } else {
-        graphPan = { lastX: px, lastY: py }
-    }
-})
-
-els.graphCanvas.addEventListener('pointermove', (e) => {
-    const rect = els.graphCanvas.getBoundingClientRect()
-    const px = e.clientX - rect.left, py = e.clientY - rect.top
-    if (graphDrag) {
-        const d = Math.abs(px - graphDrag.lastX) + Math.abs(py - graphDrag.lastY)
-        if (d > 3) graphDrag.moved = true
-        graphDrag.lastX = px; graphDrag.lastY = py
-        const { scale } = graphView
-        const body = els.graphPanel.querySelector('.graphBody')
-        const ox = body.clientWidth / 2 - graphView.tx, oy = body.clientHeight / 2 - graphView.ty
-        graphPos[graphDrag.idx * 2] = (px - ox) / scale
-        graphPos[graphDrag.idx * 2 + 1] = (py - oy) / scale
-        graphSimDone = false   // 拖拽期间继续模拟（其它节点重新排布）
-        graphSimSteps = 0
-        if (!graphRAF) startGraphSim()
-    } else if (graphPan) {
-        // 反向：手指/鼠标向右滑 → 内容向右移（符合触摸屏直觉）
-        graphView.tx -= px - graphPan.lastX
-        graphView.ty -= py - graphPan.lastY
-        graphPan.lastX = px; graphPan.lastY = py
-    } else if (graphData) {
-        const idx = graphHitNode(px, py)
-        if (idx !== graphHover) { graphHover = idx; drawGraph() }
-    }
-})
-
-els.graphCanvas.addEventListener('pointerup', (e) => {
-    const wasDrag = graphDrag
-    const wasPan = graphPan
-    graphDrag = null
-    graphPan = null
-    if (wasDrag && !wasDrag.moved) {
-        // 点击节点 → 关闭图谱并打开对应笔记（直接看到内容）
-        const nd = graphData.nodes[wasDrag.idx]
-        const target = joinPath(state.rootPath, nd.rel.split('/').join('\\'))
-        closeGraph()
-        openFileByPath(target)
-    }
-    if (wasDrag) graphFixed.delete(wasDrag.idx)
-    if (wasPan) { /* 平移结束 */ }
-})
-
-els.graphCanvas.addEventListener('wheel', (e) => {
-    e.preventDefault()
-    const rect = els.graphCanvas.getBoundingClientRect()
-    const px = e.clientX - rect.left, py = e.clientY - rect.top
-    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12
-    const ns = Math.max(0.25, Math.min(4, graphView.scale * factor))
-    const k = ns / graphView.scale
-    // 以鼠标为锚点缩放
-    const body = els.graphPanel.querySelector('.graphBody')
-    const ox = body.clientWidth / 2 - graphView.tx, oy = body.clientHeight / 2 - graphView.ty
-    graphView.tx = (graphView.tx - px) * k + px
-    graphView.ty = (graphView.ty - py) * k + py
-    graphView.scale = ns
-    drawGraph()
-})
-
-els.graphCanvas.addEventListener('dblclick', (e) => {
-    // 空白双击复位视图；节点双击也复位（不打开两次）
-    graphView = { scale: 1, tx: 0, ty: 0 }
-    drawGraph()
-})
-
-els.graphRefreshBtn.addEventListener('click', loadGraph)
-els.graphCloseBtn.addEventListener('click', closeGraph)
-els.graphBtn.addEventListener('click', () => (els.graphPanel.classList.contains('hidden') ? openGraph() : closeGraph()))
-// 打开工作区 / 刷新时若图谱开着则重扫（数据可能已变）
-window.addEventListener('resize', () => { if (!els.graphPanel.classList.contains('hidden')) drawGraph() })
-
-// ================================================================
 // 事件绑定
 // ================================================================
 
 els.openFolderBtn.addEventListener('click', chooseFolder)
-// 编辑器头部 🧩 按钮：弹出插件命令菜单（#14 商店）
-els.pluginBtn.addEventListener('click', (e) => showPluginMenu(e.clientX, e.clientY))
-// 设置面板：重新加载插件（#14）
-els.setReloadPlugins.addEventListener('click', () => {
-    PluginManager.load(state.rootPath || null)
-    showNotice('插件已重新加载')
-})
-// 设置面板：打开插件商店
-els.setOpenStore.addEventListener('click', () => window.PluginStore.open())
 // 点击侧栏路径栏 = 切换工作区（功能与命令面板"切换工作区"一致）
 els.currentPath.addEventListener('click', () => state.rootPath && switchWorkspace())
 // 显眼的"⇄ 切换"按钮（工作区栏左侧第一个按钮）
@@ -4801,7 +3915,7 @@ els.editor.addEventListener('contextmenu', (e) => {
     showEditorContextMenu(e.clientX, e.clientY)
 })
 
-// 快捷键（capture 阶段：块编辑 textarea 会 stopPropagation，冒泡监听收不到 Ctrl+Shift+P 等）
+// 快捷键
 document.addEventListener('keydown', (e) => {
     const mod = e.ctrlKey || e.metaKey
     if (mod && e.shiftKey && e.key.toLowerCase() === 'p') {
@@ -4820,39 +3934,18 @@ document.addEventListener('keydown', (e) => {
         else { els.findInput.focus(); els.findInput.select() }
         return
     }
-    if (mod && e.key.toLowerCase() === 'w') {
-        e.preventDefault()          // Ctrl+W：关闭当前标签
-        if (state.currentFile) closeTab(state.currentFile)
-        return
-    }
-    if (e.key === 'Tab' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault()          // Ctrl+Tab / Ctrl+Shift+Tab：循环切换标签
-        if (state.tabs.length > 1) {
-            const cur = state.tabs.findIndex((t) => t.id === state.activeTabId)
-            const n = state.tabs.length
-            const next = e.shiftKey ? (cur - 1 + n) % n : (cur + 1) % n
-            activateTab(state.tabs[next].id)
-        }
-        return
-    }
     if (mod && (e.key.toLowerCase() === 'p' || e.key.toLowerCase() === 'k')) {
         e.preventDefault()          // Ctrl+P/K：快速切换器
         if (!els.quickSwitcher.classList.contains('hidden')) closeQuickSwitcher()
         else openQuickSwitcher()
     }
-}, true)
-
-// A：双击标签栏空白处新建空白标签（点中标签本身则忽略）
-els.tabBar.addEventListener('dblclick', (e) => {
-    if (e.target.closest('.tab')) return
-    addBlankTab()
 })
 
 // ================================================================
 // 启动初始化
 // ================================================================
 
-applyTheme(state.themeMode)
+applyTheme(state.theme)
 // #11：初始单个面板为活动面板 + 点击面板 0 内任意处激活它（面板 1 在 createPaneDom 里绑定）
 const p0 = document.getElementById('pane0')
 if (p0) {
@@ -4867,7 +3960,5 @@ renderSessionRestore()
 renderFavorites()
 renderRecentFiles()
 renderTags()
-// 启动即加载用户级插件（无工作区也能用全局插件）；工作区插件由 loadRoot 加载
-loadPluginsForWorkspace()
 // 自动恢复上次会话：存在快照则直接进入主界面，否则停在启动界面
 restoreSession()

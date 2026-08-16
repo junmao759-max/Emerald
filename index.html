@@ -106,19 +106,39 @@
             flex-direction: row;
         }
 
-        /* --- Left sidebar --- */
+        /* --- Left sidebar（F：宽度可拖拽，max 放宽到 560） --- */
         .catalogueContainer {
             flex: 1;
             min-width: 220px;
-            max-width: 360px;
+            max-width: 560px;
             display: flex;
             flex-direction: column;
             background: var(--bg-sidebar);
             border-right: 1px solid var(--border);
+            position: relative;
             transition: flex 0.3s cubic-bezier(0.4, 0, 0.2, 1),
                 min-width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
                 max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
                 opacity 0.25s ease;
+        }
+        /* F：右缘拖拽手柄（调整侧栏宽度） */
+        .sidebarResizer {
+            position: absolute;
+            top: 0;
+            right: -5px;
+            width: 10px;
+            height: 100%;
+            cursor: col-resize;
+            z-index: 8;
+            border-radius: 0 6px 6px 0;
+            transition: background var(--transition);
+        }
+        .sidebarResizer:hover {
+            background: var(--accent-soft);
+        }
+        .sidebarResizer.dragging {
+            background: var(--accent);
+            opacity: 0.6;
         }
         /* 侧栏收起：宽度过渡到 0，主区自动占满 */
         .appRow.sidebar-collapsed .catalogueContainer {
@@ -138,6 +158,7 @@
             padding: 0 14px;
             border-bottom: 1px solid var(--border);
             background: var(--bg-toolbar);
+            overflow-x: auto;   /* 窗口过窄时按钮行可横向滚动 */
         }
 
         .mainCatalogue {
@@ -289,7 +310,7 @@
             justify-content: center;
         }
 
-        /* Main title bar */
+        /* Main title bar（FIX：左右按钮容器不再收缩，避免图标溢出到拖动区不可点） */
         .mainArea > .topNav {
             gap: 8px;
             padding: 0 12px;
@@ -300,11 +321,12 @@
             font-weight: 600;
             letter-spacing: 3px;
             color: var(--text);
+            overflow-x: auto;   /* 极窄窗口兜底：整条可横向滚动 */
         }
 
         .leftContainer,
         .rightContainer {
-            flex: 1;
+            flex: 1 0 auto;     /* 不收缩到内容以下，图标永不溢出 */
             min-width: 0;
             display: flex;
             align-items: center;
@@ -326,16 +348,32 @@
             overflow: hidden;
             text-overflow: ellipsis;
         }
+        /* 应用 Logo（icon.png）：顶栏标题前的图标，圆角小尺寸 */
+        .appLogo {
+            width: 16px;
+            height: 16px;
+            flex: none;
+            margin-right: 7px;
+            border-radius: 3px;
+            -webkit-user-drag: none;
+            user-select: none;
+        }
+        .appTitle {
+            font-weight: 600;
+            letter-spacing: 0.2px;
+        }
 
         /* ============================================================
          * 无边框窗口拖动（frame:false 下必须用 -webkit-app-region 指定拖动区）
-         * 拖动区：顶栏空白处 / 标题文字区 / 启动屏背景
+         * 拖动区：顶栏空白处 / 标题文字区（标签栏、顶栏）
          * 可交互元素必须恢复 no-drag，否则点击会被拖动区吞掉
          * 双击拖动区 = 最大化 / 还原（Windows 系统行为）
+         * 注意：启动屏（launchScreen）不放拖动区——刚打开应用拖入文件夹是核心操作，
+         * drag region 会被 OS 层拦截拖放（显示禁止符号、无法 drop）。
+         * 拖拽文件期间 app.js 会把顶栏/标签栏临时切成 no-drag 兜底。
          * ============================================================ */
         .labelNav,
-        .topNav,
-        .launchScreen {
+        .topNav {
             -webkit-app-region: drag;
             user-select: none;
             cursor: default;
@@ -345,18 +383,41 @@
         .labelNav .tabBar .tab,
         .labelNav .tabAddBtn,
         .topNav .leftContainer,
-        .topNav .rightContainer,
-        .launchScreen .launchWinBtn,
-        .launchScreen .launchBtn,
-        .launchScreen .session-btn,
-        .launchScreen .recentFolders {
+        .topNav .rightContainer {
             -webkit-app-region: no-drag;
         }
 
         .mainRender {
             flex: 38;
             min-height: 0;
+            position: relative;   /* 分屏拖放预览定位基准 */
             background: radial-gradient(ellipse at 12% 0%, var(--accent-soft), transparent 42%), var(--bg-app);   /* D3：左上角氛围光 */
+        }
+        /* FIX2：从目录树拖文件到渲染区 → 右侧绿色阴影预览分屏区域 */
+        .splitDropHint {
+            position: absolute;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            width: 50%;
+            background: rgba(16, 185, 129, 0.12);
+            border-left: 3px dashed var(--accent);
+            border-radius: 0 var(--radius-md) var(--radius-md) 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+            z-index: 20;
+            transition: opacity 0.12s ease;
+        }
+        .splitDropText {
+            padding: 10px 18px;
+            border-radius: 8px;
+            background: var(--bg-surface);
+            box-shadow: var(--shadow-md);
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--accent-strong);
         }
 
         /* --- Icons --- */
@@ -414,23 +475,46 @@
             -webkit-backdrop-filter: blur(12px);
         }
 
-        /* --- Scrollbar（F4：更细、hover 变 accent） --- */
+        /* ============================================================
+         * 绿宝石风滚动条：纤细圆润、翡翠渐变、悬停发光
+         * 8px 宽 + 2px 透明内边距 = 4px 可见细条；横向纵向同款
+         * ============================================================ */
         ::-webkit-scrollbar {
-            width: 6px;
-            height: 6px;
+            width: 8px;
+            height: 8px;
         }
-
-        ::-webkit-scrollbar-thumb {
-            background: rgba(135, 146, 164, 0.3);
-            border-radius: 3px;
-        }
-
-        ::-webkit-scrollbar-thumb:hover {
-            background: var(--accent);
-        }
-
         ::-webkit-scrollbar-track {
             background: transparent;
+            border-radius: 8px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: linear-gradient(180deg, rgba(16, 185, 129, 0.38), rgba(13, 158, 111, 0.38));
+            border-radius: 8px;
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+            background-clip: padding-box;
+            box-shadow: 0 0 8px rgba(16, 185, 129, 0.45);
+        }
+        ::-webkit-scrollbar-thumb:active {
+            background: var(--accent-strong);
+            background-clip: padding-box;
+        }
+        ::-webkit-scrollbar-corner {
+            background: transparent;
+        }
+        /* 暗色主题：默认色提亮一档，悬停光晕更饱满 */
+        :root[data-theme="dark"] ::-webkit-scrollbar-thumb {
+            background: linear-gradient(180deg, rgba(52, 211, 153, 0.36), rgba(47, 184, 132, 0.36));
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+        :root[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+            background: linear-gradient(180deg, #34d399, #059669);
+            background-clip: padding-box;
+            box-shadow: 0 0 10px rgba(52, 211, 153, 0.55);
         }
 
         /* ============================================================
@@ -479,6 +563,17 @@
         .launchScreen.hidden {
             display: none;
         }
+        /* 启动屏顶部拖动条：窗口可拖动，同时保留其余区域（含卡片）可拖入文件 */
+        .launchDragBar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 88px;   /* 给右上角最小化/关闭按钮让位 */
+            height: 40px;
+            -webkit-app-region: drag;
+            z-index: 5;
+            cursor: default;
+        }
         .launchCard {
             display: flex;
             flex-direction: column;
@@ -505,6 +600,14 @@
             border-radius: var(--radius-lg);
             box-shadow: 0 8px 20px rgba(16, 185, 129, 0.35);
             animation: logoBreath 3.6s ease-in-out infinite;   /* A2：呼吸光晕 */
+            overflow: hidden;   /* 让 icon.png 填满圆角容器 */
+        }
+        .launchLogoImg {
+            width: 100%;
+            height: 100%;
+            display: block;
+            -webkit-user-drag: none;
+            user-select: none;
         }
         @keyframes logoBreath {
             0%, 100% { box-shadow: 0 8px 20px rgba(16, 185, 129, 0.30); transform: scale(1); }
@@ -903,6 +1006,54 @@
             background: var(--bg-surface);
             position: relative; /* 反链浮层以此为定位基准 */
         }
+        /* #11 分屏容器与面板 */
+        .splitContainer {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: row;
+        }
+        .pane {
+            flex: 1;
+            min-width: 0;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-surface);
+            position: relative;   /* 反链浮层定位基准 */
+        }
+        .pane + .pane {
+            border-left: 1px solid var(--border);
+        }
+        .pane-empty {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--icon-muted);
+            font-size: 13px;
+        }
+        .splitBtn {
+            flex: none;
+            padding: 4px 9px;
+            border: 1px solid var(--border-strong);
+            border-radius: 6px;
+            background: var(--bg-surface);
+            color: var(--icon);
+            font-size: 12px;
+            cursor: pointer;
+            transition: background var(--transition), color var(--transition), border-color var(--transition);
+        }
+        .splitBtn:hover {
+            background: var(--bg-hover);
+            color: var(--accent-strong);
+            border-color: var(--accent);
+        }
+        .splitBtn.on {
+            background: var(--accent-soft);
+            color: var(--accent-strong);
+            border-color: var(--accent);
+        }
         .editorHeader {
             display: flex;
             align-items: center;
@@ -910,6 +1061,7 @@
             padding: 8px 16px;
             border-bottom: 1px solid var(--border);
             background: var(--bg-toolbar);
+            overflow-x: auto;   /* 头部按钮过多时可横向滚动 */
         }
         .editorTitle {
             flex: 1;
@@ -1014,6 +1166,79 @@
             box-shadow: inset 0 0 0 1px var(--accent);
         }
 
+        /* --- 查找 / 替换条（Ctrl+F） --- */
+        .findBar {
+            flex: none;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 10px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-toolbar);
+            font-size: 12px;
+            animation: fadeIn 0.12s ease;
+            overflow-x: auto;   /* 查找/替换控件多，窄窗口可横向滚动 */
+        }
+        .findBar input {
+            border: 1px solid var(--border-strong);
+            border-radius: 5px;
+            background: var(--bg-app);
+            color: var(--text);
+            font-size: 12px;
+            padding: 3px 8px;
+            outline: none;
+            min-width: 0;
+            transition: border-color var(--transition);
+        }
+        .findBar input:focus {
+            border-color: var(--accent);
+        }
+        #findInput {
+            flex: 1;
+            max-width: 220px;
+        }
+        #replaceInput {
+            flex: 1;
+            max-width: 220px;
+        }
+        .findCount {
+            flex: none;
+            font-size: 11px;
+            color: var(--icon-muted);
+            min-width: 30px;
+            text-align: center;
+        }
+        .findBtn {
+            flex: none;
+            border: 1px solid var(--border-strong);
+            border-radius: 5px;
+            background: var(--bg-surface);
+            color: var(--icon);
+            font-size: 11.5px;
+            padding: 3px 8px;
+            cursor: pointer;
+            transition: background var(--transition), color var(--transition), border-color var(--transition);
+        }
+        .findBtn:hover {
+            background: var(--bg-hover);
+            color: var(--accent-strong);
+            border-color: var(--accent);
+        }
+        .findBtn.findCase.active {
+            background: var(--accent-soft);
+            color: var(--accent-strong);
+            border-color: var(--accent);
+        }
+        .findBtn.findClose {
+            border: none;
+            background: none;
+            color: var(--icon-muted);
+        }
+        .findBtn.findClose:hover {
+            background: var(--bg-hover);
+            color: #e11d48;
+        }
+
         /* --- Obsidian 风格所见即所得编辑（渲染态 + 点击块编辑） --- */
         #liveEditor {
             position: relative;
@@ -1054,12 +1279,12 @@
             animation: blkFlash 0.9s ease;
         }
 
-        /* 预览面板 */
+        /* 预览面板（阅读列宽：大窗口居中限宽，小窗口保持留白） */
         .previewPane {
             flex: 1;
             min-height: 0;
             overflow: auto;
-            padding: 16px 24px;
+            padding: 22px max(28px, calc(50% - 400px));
             background: var(--bg-surface);
         }
         .code-preview {
@@ -1078,7 +1303,7 @@
         /* --- Markdown 渲染样式（Obsidian 风格） --- */
         .md-body {
             padding: 6px;
-            line-height: 1.75;
+            line-height: 1.8;
             font-size: 15px;
             overflow-wrap: break-word;
         }
@@ -1088,7 +1313,7 @@
         .md-body h4,
         .md-body h5,
         .md-body h6 {
-            margin: 1.1em 0 0.5em;
+            margin: 1.2em 0 0.55em;
             font-weight: 700;
             line-height: 1.3;
         }
@@ -1099,6 +1324,8 @@
         }
         .md-body h2 {
             font-size: 1.4em;
+            border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+            padding-bottom: 0.22em;
         }
         .md-body h3 {
             font-size: 1.2em;
@@ -1107,7 +1334,7 @@
             font-size: 1.05em;
         }
         .md-body p {
-            margin: 0.6em 0;
+            margin: 0.7em 0;
         }
         .md-body a {
             color: var(--accent-strong);
@@ -1118,59 +1345,99 @@
         }
         .md-body ul,
         .md-body ol {
-            margin: 0.6em 0;
+            margin: 0.7em 0;
             padding-left: 1.6em;
         }
         .md-body li {
-            margin: 0.25em 0;
+            margin: 0.3em 0;
         }
         .md-body blockquote {
             border-left: 3px solid var(--accent);
             background: var(--accent-soft);
-            margin: 0.8em 0;
-            padding: 0.3em 1em;
+            margin: 0.9em 0;
+            padding: 0.5em 1.1em;
             color: var(--text-muted);
-            border-radius: 0 6px 6px 0;
+            border-radius: 0 8px 8px 0;
         }
         .md-body pre {
             background: var(--code-bg);
-            padding: 12px 14px;
-            border-radius: 8px;
+            padding: 14px 16px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
             overflow-x: auto;
-            margin: 0.8em 0;
+            margin: 0.9em 0;
             line-height: 1.6;
+        }
+        .md-body pre::before {
+            content: '⌨ 代码';
+            display: block;
+            font-size: 10.5px;
+            font-family: "Segoe UI", sans-serif;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: var(--icon-muted);
+            margin-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 6px;
         }
         .md-body code {
             font-family: "Cascadia Code", Consolas, monospace;
-            font-size: 13px;
+            font-size: 12.5px;
             background: var(--code-bg);
-            padding: 2px 5px;
-            border-radius: 4px;
+            padding: 2px 6px;
+            border-radius: 5px;
+            border: 1px solid var(--border);
         }
         .md-body pre code {
             background: none;
+            border: none;
             padding: 0;
+            font-size: 13px;
         }
         .md-body table {
-            border-collapse: collapse;
-            margin: 0.8em 0;
+            border-collapse: separate;
+            border-spacing: 0;
+            margin: 0.9em 0;
+            border: 1px solid var(--border-strong);
+            border-radius: 10px;
+            overflow: hidden;
         }
         .md-body th,
         .md-body td {
-            border: 1px solid var(--border-strong);
-            padding: 6px 12px;
+            border: none;
+            border-bottom: 1px solid var(--border);
+            border-right: 1px solid var(--border);
+            padding: 7px 14px;
+        }
+        .md-body th:last-child,
+        .md-body td:last-child {
+            border-right: none;
+        }
+        .md-body tr:last-child td {
+            border-bottom: none;
         }
         .md-body th {
-            background: var(--bg-sidebar);
+            background: linear-gradient(180deg, var(--bg-toolbar), var(--bg-sidebar));
+            font-weight: 600;
+            color: var(--text);
+        }
+        .md-body tbody tr:nth-child(even) {
+            background: var(--bg-app);
         }
         .md-body hr {
             border: none;
             border-top: 1px solid var(--border);
-            margin: 1.2em 0;
+            margin: 1.4em 0;
         }
         .md-body img {
             max-width: 100%;
-            border-radius: 6px;
+            border-radius: 8px;
+        }
+        /* 阅读选区：accent 底 + 白字，反衬更清晰 */
+        .md-body ::selection,
+        .liveEditor ::selection {
+            background: var(--accent);
+            color: #fff;
         }
 
         /* --- 任务列表（可勾选回写） --- */
@@ -1423,6 +1690,625 @@
             width: 100%;
             border: none;
             background: #fff;
+        }
+
+        /* ============================================================
+         * Git 集成（#10）：树徽章 / 变更面板 / diff 着色
+         * ============================================================ */
+        /* 树行上的 git 状态徽章 */
+        .git-badge {
+            flex: none;
+            width: 16px;
+            height: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            color: #fff;
+        }
+        .git-badge.b-M { background: #d97706; }   /* 已修改 */
+        .git-badge.b-A { background: #059669; }   /* 已新增 */
+        .git-badge.b-U { background: #6b7280; }   /* 未跟踪 */
+        .git-badge.b-D { background: #dc2626; }   /* 已删除 */
+        .git-badge.b-R { background: #7c3aed; }   /* 重命名 */
+
+        /* Git 变更面板 */
+        .gitPanel {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-surface);
+        }
+        .gitHeader {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 8px 16px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-toolbar);
+        }
+        .gitTitle {
+            flex: 1;
+            min-width: 0;
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .gitHeaderBtns {
+            flex: none;
+            display: flex;
+            gap: 4px;
+        }
+        /* 远程仓库操作栏 */
+        .gitRemoteBar {
+            flex: none;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 16px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-toolbar);
+            font-size: 12px;
+        }
+        .gitRemoteInfo {
+            flex: 1;
+            min-width: 0;
+            color: var(--text-muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-family: "Cascadia Code", Consolas, monospace;
+        }
+        .gitRemoteInfo.linked {
+            color: var(--accent-strong);
+        }
+        .gitRemoteBtns {
+            flex: none;
+            display: flex;
+            gap: 6px;
+        }
+        .gitRemoteBtn {
+            flex: none;
+            padding: 3px 10px;
+            border: 1px solid var(--border-strong);
+            border-radius: 5px;
+            background: var(--bg-surface);
+            color: var(--icon);
+            font-size: 12px;
+            cursor: pointer;
+            transition: background var(--transition), color var(--transition), border-color var(--transition), opacity var(--transition);
+        }
+        .gitRemoteBtn:hover:not(:disabled) {
+            background: var(--bg-hover);
+            color: var(--accent-strong);
+            border-color: var(--accent);
+        }
+        .gitRemoteBtn:disabled {
+            opacity: 0.4;
+            cursor: default;
+        }
+        .gitIconBtn {
+            border: none;
+            background: none;
+            color: var(--icon);
+            font-size: 14px;
+            cursor: pointer;
+            padding: 3px 7px;
+            border-radius: 6px;
+            transition: background var(--transition), color var(--transition);
+        }
+        .gitIconBtn:hover {
+            background: var(--bg-hover);
+            color: var(--accent-strong);
+        }
+        .gitBody {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: row;
+        }
+        .gitFiles {
+            flex: none;
+            width: 45%;
+            min-width: 200px;
+            overflow-y: auto;
+            border-right: 1px solid var(--border);
+            padding: 6px;
+        }
+        .gitFileRow {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12.5px;
+            color: var(--text);
+            transition: background var(--transition);
+        }
+        .gitFileRow:hover {
+            background: var(--bg-hover);
+        }
+        .gitFileRow.active {
+            background: var(--accent-soft);
+        }
+        .gitFileRow input[type="checkbox"] {
+            flex: none;
+            accent-color: var(--accent);
+            width: 13px;
+            height: 13px;
+            cursor: pointer;
+        }
+        .gitFileRow .git-badge {
+            width: 15px;
+            height: 15px;
+            font-size: 9px;
+        }
+        .gitRelPath {
+            flex: 1;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .gitFileRow .gitStageTag {
+            flex: none;
+            font-size: 10px;
+            color: var(--accent-strong);
+            opacity: 0;
+            transition: opacity var(--transition);
+        }
+        .gitFileRow.staged .gitStageTag {
+            opacity: 1;
+        }
+        .gitEmpty {
+            padding: 20px 14px;
+            text-align: center;
+            color: var(--icon-muted);
+            font-size: 13px;
+        }
+        .gitEmpty button {
+            margin-top: 10px;
+            padding: 6px 14px;
+            border: 1px solid var(--accent);
+            border-radius: 6px;
+            background: var(--bg-surface);
+            color: var(--accent-strong);
+            font-size: 12.5px;
+            cursor: pointer;
+            transition: background var(--transition), color var(--transition);
+        }
+        .gitEmpty button:hover {
+            background: var(--accent);
+            color: #fff;
+        }
+        .gitDiff {
+            flex: 1;
+            min-width: 0;
+            overflow: auto;
+            padding: 12px 14px;
+            font-family: "Cascadia Code", Consolas, monospace;
+            font-size: 12.5px;
+            line-height: 1.6;
+            white-space: pre;
+        }
+        .gitDiff .d-hunk { color: var(--accent); }
+        .gitDiff .d-add { color: #059669; background: rgba(5, 150, 105, 0.08); }
+        .gitDiff .d-del { color: #dc2626; background: rgba(220, 38, 38, 0.08); }
+        .gitDiff .d-meta { color: var(--icon-muted); }
+        .gitCommitBar {
+            display: flex;
+            gap: 8px;
+            padding: 8px 12px;
+            border-top: 1px solid var(--border);
+            background: var(--bg-toolbar);
+        }
+        .gitCommitBar input {
+            flex: 1;
+            min-width: 0;
+            border: 1px solid var(--border-strong);
+            border-radius: 6px;
+            background: var(--bg-app);
+            color: var(--text);
+            font-size: 12.5px;
+            padding: 6px 10px;
+            outline: none;
+            transition: border-color var(--transition);
+        }
+        .gitCommitBar input:focus {
+            border-color: var(--accent);
+        }
+        .gitCommitBtn {
+            flex: none;
+            padding: 6px 16px;
+            border: none;
+            border-radius: 6px;
+            background: var(--accent);
+            color: #fff;
+            font-size: 12.5px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background var(--transition), opacity var(--transition);
+        }
+        .gitCommitBtn:hover:not(:disabled) {
+            background: var(--accent-strong);
+        }
+        .gitCommitBtn:disabled {
+            opacity: 0.4;
+            cursor: default;
+        }
+
+        /* ============================================================
+         * 知识图谱（#13）：wikilink 力导向布局 + 孤岛检测，Canvas 渲染
+         * ============================================================ */
+        .graphPanel {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-surface);
+        }
+        .graphHeader {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 8px 16px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-toolbar);
+        }
+        .graphTitle {
+            flex: none;
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text);
+        }
+        .graphStats {
+            flex: 1;
+            min-width: 0;
+            font-size: 12px;
+            color: var(--text-muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .graphHeaderBtns {
+            flex: none;
+            display: flex;
+            gap: 4px;
+        }
+        .graphIconBtn {
+            border: none;
+            background: none;
+            color: var(--text-muted);
+            font-size: 13px;
+            line-height: 1;
+            padding: 4px 7px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background var(--transition), color var(--transition);
+        }
+        .graphIconBtn:hover {
+            background: var(--bg-hover);
+            color: var(--text);
+        }
+        .graphBody {
+            flex: 1;
+            min-height: 0;
+            position: relative;
+            overflow: hidden;
+            background: var(--bg-app);
+        }
+        .graphBody canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            cursor: grab;
+        }
+        .graphBody canvas:active {
+            cursor: grabbing;
+        }
+        .graphHint {
+            position: absolute;
+            left: 12px;
+            bottom: 10px;
+            z-index: 2;
+            font-size: 11px;
+            color: var(--text-muted);
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 4px 10px;
+            opacity: 0.85;
+            pointer-events: none;
+            user-select: none;
+        }
+        .graphEmpty,
+        .graphLoading {
+            position: absolute;
+            inset: 0;
+            z-index: 2;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            color: var(--text-muted);
+            pointer-events: none;
+        }
+
+        /* 轻量通知（插件 showNotice 等）：右下角自动消失 */
+        .appNotice {
+            position: fixed;
+            right: 20px;
+            bottom: 42px;
+            z-index: 20000;
+            max-width: 360px;
+            padding: 9px 16px;
+            border-radius: 8px;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-strong);
+            box-shadow: var(--shadow-md);
+            font-size: 12.5px;
+            color: var(--text);
+            opacity: 0;
+            transform: translateY(8px);
+            transition: opacity 0.18s ease, transform 0.18s ease;
+            pointer-events: none;
+        }
+        .appNotice.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        /* 插件商店 */
+        .pluginStoreCard {
+            width: min(620px, 92vw);
+            max-height: 78vh;
+        }
+        .storeSub {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+        }
+        .pluginStoreList {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            overflow-y: auto;
+            max-height: 56vh;
+            padding-right: 4px;
+        }
+        .store-card {
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 12px 14px;
+            background: var(--bg-app);
+        }
+        .store-card-head {
+            display: flex;
+            align-items: baseline;
+            gap: 10px;
+            margin-bottom: 4px;
+        }
+        .store-card-title {
+            font-size: 13.5px;
+            font-weight: 700;
+            color: var(--text);
+        }
+        .store-card-author {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        .store-card-desc {
+            font-size: 12px;
+            color: var(--text-muted);
+            line-height: 1.5;
+            margin-bottom: 10px;
+        }
+        .store-card-foot {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .store-card-badge {
+            font-size: 11.5px;
+            color: var(--text-muted);
+            padding: 2px 8px;
+            border-radius: 20px;
+            background: var(--bg-hover);
+        }
+        .store-card-badge.on {
+            color: var(--accent);
+            background: var(--accent-soft);
+        }
+
+        /* ============================================================
+         * AI 助手（#12，BYO-Key）：面板 + 设置对话框
+         * ============================================================ */
+        .aiPanel {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-surface);
+        }
+        .aiHeader {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 8px 16px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-toolbar);
+        }
+        .aiTitle {
+            flex: 1;
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text);
+        }
+        .aiHeaderBtns {
+            flex: none;
+            display: flex;
+            gap: 4px;
+        }
+        .aiIconBtn {
+            border: none;
+            background: none;
+            color: var(--icon);
+            font-size: 14px;
+            cursor: pointer;
+            padding: 3px 7px;
+            border-radius: 6px;
+            transition: background var(--transition), color var(--transition);
+        }
+        .aiIconBtn:hover {
+            background: var(--bg-hover);
+            color: var(--accent-strong);
+        }
+        .aiMessages {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 12px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .ai-msg {
+            max-width: 85%;
+            padding: 8px 12px;
+            border-radius: 10px;
+            font-size: 13px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .ai-msg-user {
+            align-self: flex-end;
+            background: var(--accent);
+            color: #fff;
+        }
+        .ai-msg-assistant {
+            align-self: flex-start;
+            background: var(--bg-app);
+            border: 1px solid var(--border);
+        }
+        .ai-msg-assistant.streaming {
+            border-color: var(--accent);
+        }
+        .ai-msg-error {
+            align-self: center;
+            color: #e11d48;
+            font-size: 12px;
+        }
+        .aiInputBar {
+            display: flex;
+            gap: 8px;
+            padding: 8px 12px;
+            border-top: 1px solid var(--border);
+            background: var(--bg-toolbar);
+            align-items: flex-end;
+        }
+        .aiInputBar textarea {
+            flex: 1;
+            min-width: 0;
+            border: 1px solid var(--border-strong);
+            border-radius: 8px;
+            padding: 8px 10px;
+            font-size: 13px;
+            resize: none;
+            background: var(--bg-app);
+            color: var(--text);
+            outline: none;
+            font-family: inherit;
+            transition: border-color var(--transition);
+        }
+        .aiInputBar textarea:focus {
+            border-color: var(--accent);
+        }
+        .aiSendBtn {
+            flex: none;
+            padding: 7px 16px;
+            border: none;
+            border-radius: 8px;
+            background: var(--accent);
+            color: #fff;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background var(--transition), opacity var(--transition);
+        }
+        .aiSendBtn:hover:not(:disabled) {
+            background: var(--accent-strong);
+        }
+        .aiSendBtn:disabled {
+            opacity: 0.4;
+            cursor: default;
+        }
+        .aiSendBtn.aiAbort {
+            background: #e11d48;
+        }
+        .aiSendBtn.aiAbort:hover {
+            background: #b91c1c;
+        }
+        .aiCtxBtn {
+            flex: none;
+            padding: 6px 10px;
+            border: 1px solid var(--border-strong);
+            border-radius: 8px;
+            background: var(--bg-surface);
+            color: var(--icon);
+            font-size: 12px;
+            cursor: pointer;
+            transition: background var(--transition), color var(--transition), border-color var(--transition);
+        }
+        .aiCtxBtn:hover {
+            background: var(--bg-hover);
+            color: var(--accent-strong);
+            border-color: var(--accent);
+        }
+        .aiCtxBtn.on {
+            background: var(--accent-soft);
+            color: var(--accent-strong);
+            border-color: var(--accent);
+        }
+        /* 上下文状态条：默认开启时显示附带文件，简洁绿宝石提示 */
+        .aiCtxStatus {
+            flex: none;
+            padding: 4px 16px;
+            border-bottom: 1px solid var(--border);
+            background: var(--accent-soft);
+            color: var(--accent-strong);
+            font-size: 11.5px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .aiCtxStatus.off {
+            background: var(--bg-toolbar);
+            color: var(--icon-muted);
+        }
+        .aiSelect {
+            flex: 1;
+            min-width: 0;
+            border: 1px solid var(--border-strong);
+            border-radius: 5px;
+            background: var(--bg-app);
+            color: var(--text);
+            font-size: 12.5px;
+            padding: 4px 8px;
+        }
+        .aiSettingsCard {
+            width: 400px;
         }
 
         /* ============================================================
@@ -1962,6 +2848,40 @@
             text-overflow: ellipsis;
         }
 
+        /* G：大纲侧边栏 */
+        .outlineSection {
+            flex: none;
+            max-height: 200px;
+            overflow-y: auto;
+            padding: 6px 8px;
+            border-bottom: 1px solid var(--border);
+        }
+        .outline-item {
+            padding: 3px 6px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            transition: background var(--transition), color var(--transition);
+        }
+        .outline-item:hover {
+            background: var(--bg-hover);
+            color: var(--accent-strong);
+        }
+        .outline-item.l1 {
+            padding-left: 10px;
+            font-weight: 600;
+        }
+        .outline-item.l2 {
+            padding-left: 22px;
+        }
+        .outline-item.l3 {
+            padding-left: 34px;
+        }
+
         /* --- 空白标签快捷键速查卡（B3） --- */
         .blankHint {
             flex: 1;
@@ -2116,6 +3036,339 @@
         }
 
         /* ============================================================
+         * 设置面板（D 升级）：品牌头 + 分区卡片 + 质感按钮
+         * ============================================================ */
+        .settingsCard {
+            width: 430px;
+            max-width: 90vw;
+            max-height: 82vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            padding: 0;
+            border-radius: 14px;
+        }
+        .settingsBrand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 18px 22px 14px;
+            background: linear-gradient(135deg, var(--accent-soft), transparent 60%);
+            border-bottom: 1px solid var(--border);
+        }
+        .settingsLogo {
+            width: 38px;
+            height: 38px;
+            flex: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 11px;
+            background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+            color: #fff;
+            font-size: 17px;
+            box-shadow: 0 4px 12px var(--accent-soft);
+            overflow: hidden;   /* 应用 Logo（icon.png）填满 */
+        }
+        .settingsLogoImg {
+            width: 100%;
+            height: 100%;
+            display: block;
+            -webkit-user-drag: none;
+            user-select: none;
+        }
+        .settingsName {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--text);
+            letter-spacing: 0.3px;
+        }
+        .settingsSub {
+            font-size: 11.5px;
+            color: var(--text-muted);
+            margin-top: 1px;
+        }
+        .settingsBody {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 14px 18px;
+            margin: 0;
+            white-space: normal;
+        }
+        .settingsSection {
+            background: var(--bg-app);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 12px 14px;
+            margin-bottom: 12px;
+            transition: border-color var(--transition);
+        }
+        .settingsSection:hover {
+            border-color: var(--border-strong);
+        }
+        .settingsSecTitle {
+            font-size: 12.5px;
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .settingsSecTitle::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: linear-gradient(90deg, var(--border-strong), transparent);
+        }
+        .settingsBtnRow {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .settingsBtnRow .modal-btn {
+            flex: 1 1 auto;
+            min-width: 110px;
+        }
+        .settingsFooter {
+            padding: 10px 22px;
+            border-top: 1px solid var(--border);
+            font-size: 11px;
+            color: var(--icon-muted);
+            text-align: center;
+        }
+
+        /* ============================================================
+         * UI 质感统一（最后检查轮）：原生控件主题化 / 毛玻璃遮罩 / 交互细节
+         * ============================================================ */
+        /* 暗色下原生控件（select 选项等）跟随主题 */
+        :root { color-scheme: light; }
+        :root[data-theme="dark"] { color-scheme: dark; }
+
+        /* 遮罩毛玻璃：弹层背后内容柔和虚化，聚焦感更强 */
+        .modal-overlay {
+            backdrop-filter: blur(5px);
+            -webkit-backdrop-filter: blur(5px);
+        }
+
+        /* 全局下拉框：去默认外观，accent 箭头 + 圆角 + 焦点环 */
+        select {
+            appearance: none;
+            -webkit-appearance: none;
+            border: 1px solid var(--border-strong);
+            border-radius: 6px;
+            background: var(--bg-app)
+                url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%2310b981' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E")
+                no-repeat right 9px center;
+            color: var(--text);
+            font-size: 12.5px;
+            font-family: inherit;
+            padding: 5px 26px 5px 10px;
+            cursor: pointer;
+            outline: none;
+            transition: border-color var(--transition), box-shadow var(--transition);
+        }
+        select:hover {
+            border-color: var(--accent);
+        }
+        select:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-soft);
+        }
+
+        /* 命令面板 / 快速切换器：未选中项也有柔和 hover */
+        .qs-item:hover:not(.active) {
+            background: var(--bg-hover);
+        }
+
+        /* 文本框选区：accent 底白字，与阅读视图一致 */
+        .editor::selection,
+        .blk-editor::selection,
+        .aiInputBar textarea::selection,
+        .findBar input::selection {
+            background: var(--accent);
+            color: #fff;
+        }
+
+        /* 空状态图标呼吸感：更"活"的欢迎页 */
+        @keyframes breathe {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.06); }
+        }
+        .emptyState .big-icon {
+            animation: breathe 5s ease-in-out infinite;
+        }
+
+        /* ============================================================
+         * 文件拖放打开（E）：拖文件/文件夹进窗口时显示提示浮层
+         * ============================================================ */
+        .dropOverlay {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(16, 185, 129, 0.10);
+            border: 3px dashed var(--accent);
+            border-radius: 14px;
+            margin: 8px;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.15s ease;
+        }
+        .dropOverlay.show {
+            opacity: 1;
+        }
+        .dropText {
+            padding: 18px 32px;
+            border-radius: 12px;
+            background: var(--bg-surface);
+            box-shadow: var(--shadow-md);
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--accent-strong);
+        }
+
+        /* ============================================================
+         * 批量重命名（#15）：模式栏 + 对话框
+         * ============================================================ */
+        .batchBar {
+            flex: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 6px 8px 2px;
+            padding: 6px 10px;
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--accent);
+            border-radius: var(--radius-sm);
+            background: var(--accent-soft);
+            font-size: 12px;
+            animation: fadeInUp 0.2s ease;
+        }
+        .batchHint {
+            flex: 1;
+            min-width: 0;
+            color: var(--text);
+        }
+        .batchHint b {
+            color: var(--accent-strong);
+        }
+        .batchBtn {
+            flex: none;
+            border: 1px solid var(--border-strong);
+            border-radius: 5px;
+            background: var(--bg-surface);
+            color: var(--icon);
+            font-size: 12px;
+            padding: 3px 10px;
+            cursor: pointer;
+            transition: background var(--transition), color var(--transition);
+        }
+        .batchBtn:hover {
+            background: var(--bg-hover);
+            color: var(--accent-strong);
+        }
+        .batchBtn.batchRename {
+            color: var(--accent-strong);
+            border-color: var(--accent);
+        }
+        .batchBtn.batchRename:disabled {
+            opacity: 0.4;
+            cursor: default;
+            border-color: var(--border-strong);
+            color: var(--icon);
+        }
+        .tree-row.batch-selected {
+            background: var(--accent-soft);
+            box-shadow: inset 2px 0 0 var(--accent);
+        }
+        /* 批量重命名对话框 */
+        .batchDialog {
+            width: 460px;
+        }
+        .settingsCard {
+            width: 460px;
+        }
+        .brMode {
+            display: flex;
+            gap: 18px;
+            margin-bottom: 10px;
+            font-size: 13px;
+            color: var(--text);
+        }
+        .brMode label {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            cursor: pointer;
+        }
+        .brMode input[type="radio"] {
+            accent-color: var(--accent);
+        }
+        .brField {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 6px 0;
+            font-size: 12.5px;
+            color: var(--text-muted);
+        }
+        .brField input[type="text"],
+        .brField input[type="number"] {
+            flex: 1;
+            min-width: 0;
+            border: 1px solid var(--border-strong);
+            border-radius: 5px;
+            background: var(--bg-app);
+            color: var(--text);
+            font-size: 12.5px;
+            padding: 4px 8px;
+            outline: none;
+        }
+        .brField input:focus {
+            border-color: var(--accent);
+        }
+        .brField input[type="number"] {
+            flex: 0 1 80px;
+        }
+        .brHint {
+            font-size: 11px;
+            color: var(--icon-muted);
+            margin: 2px 0 6px;
+        }
+        .brPreview {
+            max-height: 160px;
+            overflow-y: auto;
+            margin-top: 8px;
+            padding: 6px 8px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-app);
+            font-size: 12px;
+            font-family: "Cascadia Code", Consolas, monospace;
+            line-height: 1.7;
+        }
+        .brPreview .brRow-old {
+            color: #dc2626;
+        }
+        .brPreview .brRow-new {
+            color: #059669;
+        }
+        .brPreview .brRow-bad {
+            color: #dc2626;
+            font-weight: 700;
+        }
+        .brErr {
+            margin-top: 6px;
+            font-size: 12px;
+            color: #e11d48;
+            min-height: 16px;
+        }
+
+        /* ============================================================
          * 键盘焦点可见性（C4）：所有可交互控件统一 accent 色焦点环
          * ============================================================ */
         .ws-btn:focus-visible,
@@ -2143,11 +3396,12 @@
 <body>
     <!-- 启动界面：选好文件夹后隐藏（全屏遮罩，自带窗口控制按钮） -->
     <div class="launchScreen" id="launchScreen">
+        <div class="launchDragBar" id="launchDragBar" title="拖动窗口"></div>
         <button class="launchWinBtn" id="launchMin" title="最小化">─</button>
         <button class="launchWinBtn" id="launchClose" title="关闭">✕</button>
         <div class="launchCard">
             <div class="launchLogo">
-                <svg viewBox="0 0 24 24" width="32" height="32" fill="currentColor"><path d="M12 2l8 6-8 14L4 8l8-6zm0 2.8L6.8 8l5.2 9.1L17.2 8 12 4.8z"/></svg>
+                <img class="launchLogoImg" src="./icon.png" alt="Emerald" draggable="false">
             </div>
             <h1>Emerald</h1>
             <p class="launchSub">选择一个文件夹作为工作区，开始你的文件管理</p>
@@ -2166,6 +3420,7 @@
         <div class="appRow">
 
             <div class="catalogueContainer">
+                <div class="sidebarResizer" id="sidebarResizer" title="拖动调整宽度"></div>
 
                 <div class="functionNav">
                     <div class="workspaceBar">
@@ -2191,9 +3446,17 @@
                             <input id="treeFilterInput" placeholder="过滤文件…  Esc 清除" autocomplete="off" spellcheck="false" title="输入关键词过滤目录树（首次会先展开全部目录）">
                             <button class="treeFilterClear hidden" id="treeFilterClear" title="清除过滤">✕</button>
                         </div>
+                        <!-- 批量重命名模式栏（#15） -->
+                        <div class="batchBar hidden" id="batchBar">
+                            <span class="batchHint">已选 <b id="batchCount">0</b> 项 · 点击文件选择 / 取消</span>
+                            <button class="batchBtn batchRename" id="batchRenameBtn" disabled>重命名…</button>
+                            <button class="batchBtn" id="batchDoneBtn">完成</button>
+                        </div>
                         <div class="favoritesSection hidden" id="favoritesSection"></div>
                         <div class="favoritesSection hidden" id="recentFilesSection"></div>
                         <div class="tagsSection hidden" id="tagsSection"></div>
+                        <!-- G：大纲侧边栏（当前 Markdown 标题列表） -->
+                        <div class="outlineSection hidden" id="outlineSection"></div>
                         <div class="fileCatalogue" id="fileCatalogue">
 
                         </div>
@@ -2218,15 +3481,24 @@
                         <svg class="icon" id="forwardBtn" title="前进" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" width="20" height="20"><path d="M918.6 489.3L646.1 216.8c-12.3-12.3-32.5-12.3-44.8 0l-0.7 0.7c-12.3 12.3-12.3 32.4 0 44.7l218.7 218.7H257.6c-17.3 0-31.5 14.2-31.5 31.5s14.2 31.5 31.5 31.5h560.1L601.2 760.5c-12.5 12.5-12.5 32.9 0 45.4s32.9 12.5 45.4 0l271.1-271.1s0.1-0.1 0.2-0.1l0.7-0.7c12.3-12.3 12.3-32.4 0-44.7z" fill="#515151"></path><path d="M97.6 512.6a31.8 31.7 0 1 0 63.6 0 31.8 31.7 0 1 0-63.6 0Z" fill="#515151"></path></svg>
                     </div>
                     <div class="TextContainer">
-                        📚 Emerald 文件管理器
+                        <img class="appLogo" src="./icon.png" alt="Emerald" draggable="false">
+                        <span class="appTitle">Emerald 文件管理器</span>
                     </div>
                     <div class="rightContainer">
                         <svg class="icon" id="titleRefreshBtn" title="刷新工作区" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="18" height="18"><path d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                        <svg class="icon" id="gitBtn" title="Git 变更面板" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="18" height="18"><path d="M6 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm0 2a1 1 0 1 1 0 2 1 1 0 0 1 0-2zM18 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm0 2a1 1 0 1 1 0 2 1 1 0 0 1 0-2zM6 9v6a3 3 0 0 0 3 3h4v2h2v-2h-2a1 1 0 0 1-1-1V9h5v2.09A3 3 0 0 1 15 14h-1v2h1a1 1 0 0 0 1-1v-2h2v-2h-2V9a3 3 0 0 0-3-3H9a3 3 0 0 0-3 3z"/></svg>
+                        <svg class="icon" id="aiBtn" title="AI 助手（BYO-Key）" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="18" height="18"><path d="M12 2l1.9 5.1L19 9l-5.1 1.9L12 16l-1.9-5.1L5 9l5.1-1.9L12 2zm6 11l.95 2.55L21.5 16.5l-2.55.95L18 20l-.95-2.55-2.55-.95 2.55-.95L18 13zM5 15l.7 1.85L7.5 17.5l-1.8.65L5 20l-.7-1.85-1.8-.65 1.8-.65L5 15z"/></svg>
+                        <svg class="icon" id="graphBtn" title="知识图谱（wikilink 可视化）" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="18" height="18"><path d="M3 5a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm7 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm7 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM3 12a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm7 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm7 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM3 19a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm7 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm7 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM5 5v2.03A3 3 0 0 0 6.97 9H9m6-4v2.03A3 3 0 0 1 16.97 9H19M5 12v2.03A3 3 0 0 0 6.97 15H9m6-3v2.03A3 3 0 0 1 16.97 15H19M5 19v0m6-10v2m0 4v2m6-8v0"/></svg>
                         <svg class="icon theme-moon" id="themeMoonBtn" title="切换到暗色主题" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="18" height="18"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
                         <svg class="icon theme-sun" id="themeSunBtn" title="切换到亮色主题" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="18" height="18"><path d="M12 2a1 1 0 0 1 1 1v1.07A7 7 0 0 1 19.93 11H21a1 1 0 1 1 0 2h-1.07A7 7 0 0 1 13 19.93V21a1 1 0 1 1-2 0v-1.07A7 7 0 0 1 4.07 13H3a1 1 0 1 1 0-2h1.07A7 7 0 0 1 11 4.07V3a1 1 0 0 1 1-1zm0 5a5 5 0 1 0 0 10 5 5 0 0 0 0-10z"/></svg>
+                        <svg class="icon" id="settingsBtn" title="设置" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="18" height="18"><path d="M19.14 12.94a7.07 7.07 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.06 7.06 0 0 0-1.62-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 0 0-.6.22L2.5 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.38.31.6.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54a7.06 7.06 0 0 0 1.62-.94l2.39.96c.22.09.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg>
                     </div>
                 </div>
                 <div class="mainRender">
+                    <!-- 分屏拖放预览（FIX2）：拖树中文件到此处，绿色阴影 = 新分屏面板位置 -->
+                    <div class="splitDropHint hidden" id="splitDropHint">
+                        <div class="splitDropText">⬌ 拖至此处分屏</div>
+                    </div>
                     <!-- 空状态：未选择任何文件时显示 -->
                     <div class="emptyState" id="emptyState">
                         <div class="big-icon">
@@ -2274,28 +3546,138 @@
                     </div>
                     <!-- 文本编辑器 + 预览面板 -->
                     <div class="editorPane hidden" id="editorPane">
-                        <div class="editorHeader">
-                            <span class="fileTypeBadge" id="fileTypeBadge"></span>
-                            <span class="editorTitle" id="editorTitle"></span>
-                            <button class="viewModeBtn" id="viewModeBtn" style="display:none">👁 预览</button>
-                            <button class="viewModeBtn" id="backlinksBtn" style="display:none" title="查看引用了本文档的笔记">🔗 反链</button>
-                            <span class="fileMeta" id="fileMeta"></span>
-                            <span class="saveStatus" id="saveStatus">已保存</span>
-                            <button class="saveBtn" id="saveBtn" disabled>保存</button>
+                        <!-- 查找 / 替换条（Ctrl+F，作用于活动面板） -->
+                        <div class="findBar hidden" id="findBar">
+                            <input id="findInput" placeholder="查找" autocomplete="off" spellcheck="false">
+                            <span class="findCount" id="findCount">0/0</span>
+                            <button class="findBtn" id="findPrev" title="上一个（Shift+Enter）">↑</button>
+                            <button class="findBtn" id="findNext" title="下一个（Enter）">↓</button>
+                            <button class="findBtn findCase" id="findCase" title="区分大小写">Aa</button>
+                            <input id="replaceInput" placeholder="替换为" autocomplete="off" spellcheck="false">
+                            <button class="findBtn" id="replaceOne" title="替换当前">替换</button>
+                            <button class="findBtn" id="replaceAll" title="全部替换">全部</button>
+                            <button class="findBtn findClose" id="findClose" title="关闭（Esc）">✕</button>
                         </div>
-                        <textarea class="editor" id="editor" spellcheck="false" wrap="off"></textarea>
-                        <!-- Obsidian 风格所见即所得编辑：渲染态 + 点击块编辑原始 Markdown -->
-                        <div class="previewPane liveEditor hidden" id="liveEditor"></div>
-                        <div class="previewPane hidden" id="previewPane">
-                            <div id="previewContent"></div>
-                        </div>
-                        <!-- 反链浮层：列出工作区里 [[本文档名]] 的引用 -->
-                        <div class="backlinksPanel hidden" id="backlinksPanel">
-                            <div class="backlinks-head">
-                                <span>🔗 反链</span>
-                                <button class="backlinks-close" id="backlinksClose" title="关闭">×</button>
+                        <!-- 分屏容器（#11）：每个 .pane 是一个独立编辑器面板 -->
+                        <div class="splitContainer" id="splitContainer">
+                            <div class="pane" id="pane0" data-pane="0">
+                                <div class="editorHeader">
+                                    <span class="fileTypeBadge" id="fileTypeBadge"></span>
+                                    <span class="editorTitle" id="editorTitle"></span>
+                                    <button class="viewModeBtn" id="viewModeBtn" style="display:none">👁 预览</button>
+                                    <button class="viewModeBtn" id="backlinksBtn" style="display:none" title="查看引用了本文档的笔记">🔗 反链</button>
+                                    <span class="fileMeta" id="fileMeta"></span>
+                                    <span class="saveStatus" id="saveStatus">已保存</span>
+                                    <button class="viewModeBtn pluginBtn" id="pluginBtn" title="插件命令（🧩）">🧩</button>
+                                    <button class="saveBtn" id="saveBtn" disabled>保存</button>
+                                    <button class="splitBtn" id="splitBtn" title="分屏（▥）/ 取消分屏">▥</button>
+                                </div>
+                                <div class="pane-empty hidden" id="pane0Empty">点击左侧文件在此打开</div>
+                                <textarea class="editor" id="editor" spellcheck="false" wrap="off"></textarea>
+                                <!-- Obsidian 风格所见即所得编辑：渲染态 + 点击块编辑原始 Markdown -->
+                                <div class="previewPane liveEditor hidden" id="liveEditor"></div>
+                                <div class="previewPane hidden" id="previewPane">
+                                    <div id="previewContent"></div>
+                                </div>
+                                <!-- 反链浮层：列出工作区里 [[本文档名]] 的引用 -->
+                                <div class="backlinksPanel hidden" id="backlinksPanel">
+                                    <div class="backlinks-head">
+                                        <span>🔗 反链</span>
+                                        <button class="backlinks-close" id="backlinksClose" title="关闭">×</button>
+                                    </div>
+                                    <div class="backlinks-list" id="backlinksList"></div>
+                                </div>
                             </div>
-                            <div class="backlinks-list" id="backlinksList"></div>
+                        </div>
+                    </div>
+                    <!-- AI 助手面板（#12，BYO-Key） -->
+                    <div class="aiPanel hidden" id="aiPanel">
+                        <div class="aiHeader">
+                            <span class="aiTitle">✨ AI 助手</span>
+                            <div class="aiHeaderBtns">
+                                <button class="aiIconBtn" id="aiSettingsBtn" title="设置（API Key / 模型）">⚙</button>
+                                <button class="aiIconBtn" id="aiCloseBtn" title="关闭">✕</button>
+                            </div>
+                        </div>
+                        <!-- 上下文状态条：显示当前将附带的笔记上下文 -->
+                        <div class="aiCtxStatus" id="aiCtxStatus"></div>
+                        <div class="aiMessages" id="aiMessages">
+                            <div class="ai-msg ai-msg-assistant"><div class="ai-msg-text">你好！我是你的本地 AI 助手。先点右上角 ⚙ 配置 API Key（DeepSeek / OpenAI / Ollama 均可）。当前打开的笔记内容会自动作为提问上下文（选中文本时优先用选中内容），直接提问即可。</div></div>
+                        </div>
+                        <div class="aiInputBar">
+                            <button class="aiCtxBtn on" id="aiCtxBtn" title="自动附上当前文件作为上下文（点击切换）">📎 上下文</button>
+                            <textarea id="aiInput" placeholder="输入问题…（Enter 发送 / Shift+Enter 换行）" rows="2"></textarea>
+                            <button class="aiSendBtn" id="aiSendBtn">发送</button>
+                            <button class="aiSendBtn aiAbort hidden" id="aiAbortBtn">停止</button>
+                        </div>
+                    </div>
+                    <!-- AI 设置对话框 -->
+                    <div class="modal-overlay hidden" id="aiSettingsOverlay">
+                        <div class="modal-card aiSettingsCard">
+                            <div class="modal-title">AI 助手设置</div>
+                            <div class="modal-body">
+                                <div class="brField">服务商
+                                    <select id="aiProvider" class="aiSelect">
+                                        <option value="deepseek">DeepSeek</option>
+                                        <option value="openai">OpenAI</option>
+                                        <option value="ollama">Ollama（本地）</option>
+                                        <option value="custom">自定义</option>
+                                    </select>
+                                </div>
+                                <div class="brField">接口地址 <input id="aiBaseUrl" type="text" placeholder="https://api.deepseek.com"></div>
+                                <div class="brField">模型 <input id="aiModel" type="text" placeholder="deepseek-chat"></div>
+                                <div class="brField">API Key <input id="aiKey" type="password" placeholder="sk-...（safeStorage 加密保存）"></div>
+                                <div class="brHint" id="aiProviderHint">Key 将用系统安全存储加密后落盘，不会明文保存。</div>
+                                <div class="brErr" id="aiCfgErr"></div>
+                            </div>
+                            <div class="modal-actions">
+                                <button class="modal-btn" id="aiCfgCancel">取消</button>
+                                <button class="modal-btn primary" id="aiCfgOk">保存</button>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Git 变更面板（#10）：变更列表 + 暂存 + 差异 + 提交 -->
+                    <div class="gitPanel hidden" id="gitPanel">
+                        <div class="gitHeader">
+                            <span class="gitTitle">⎇ <span id="gitBranch">—</span> · <span id="gitCount">0</span> 个变更</span>
+                            <div class="gitHeaderBtns">
+                                <button class="gitIconBtn" id="gitRefreshBtn" title="刷新 Git 状态">🔄</button>
+                                <button class="gitIconBtn" id="gitCloseBtn" title="关闭面板">✕</button>
+                            </div>
+                        </div>
+                        <!-- 远程仓库操作栏（GitHub 等） -->
+                        <div class="gitRemoteBar" id="gitRemoteBar">
+                            <span class="gitRemoteInfo" id="gitRemoteInfo">远程：未配置</span>
+                            <div class="gitRemoteBtns">
+                                <button class="gitRemoteBtn" id="gitLinkRemoteBtn" title="链接 GitHub 等远程仓库">🔗 链接远程</button>
+                                <button class="gitRemoteBtn" id="gitPushBtn" title="推送到远程仓库">⬆ 推送</button>
+                                <button class="gitRemoteBtn" id="gitPullBtn" title="从远程仓库拉取">⬇ 拉取</button>
+                            </div>
+                        </div>
+                        <div class="gitBody">
+                            <div class="gitFiles" id="gitFiles"></div>
+                            <div class="gitDiff hidden" id="gitDiff"></div>
+                        </div>
+                        <div class="gitCommitBar">
+                            <input id="gitMsgInput" placeholder="提交说明…（Ctrl+Enter 提交；未勾选文件时自动提交全部）" autocomplete="off" spellcheck="false">
+                            <button class="gitCommitBtn" id="gitCommitBtn" disabled>提交</button>
+                        </div>
+                    </div>
+                    <!-- 知识图谱（#13）：wikilink 力导向布局 + 孤岛检测，Canvas 渲染 -->
+                    <div class="graphPanel hidden" id="graphPanel">
+                        <div class="graphHeader">
+                            <span class="graphTitle">🕸 知识图谱</span>
+                            <span class="graphStats" id="graphStats"></span>
+                            <div class="graphHeaderBtns">
+                                <button class="graphIconBtn" id="graphRefreshBtn" title="重新扫描工作区">🔄</button>
+                                <button class="graphIconBtn" id="graphCloseBtn" title="关闭图谱">✕</button>
+                            </div>
+                        </div>
+                        <div class="graphBody">
+                            <canvas id="graphCanvas"></canvas>
+                            <div class="graphHint" id="graphHint">滚轮缩放 · 拖拽节点移动 · 点击节点打开笔记 · 双击空白复位视图</div>
+                            <div class="graphEmpty hidden" id="graphEmpty">当前工作区没有 Markdown 笔记，写几篇并用 [[双向链接]] 连接它们吧</div>
+                            <div class="graphLoading hidden" id="graphLoading">🔍 正在扫描工作区…</div>
                         </div>
                     </div>
                 </div>
@@ -2342,9 +3724,113 @@
         </div>
     </div>
 
-    <!-- 渲染进程脚本：解析器 → 高亮器 → 主逻辑（顺序不能乱） -->
+    <!-- 批量重命名对话框（#15） -->
+    <div class="modal-overlay hidden" id="batchDialogOverlay">
+        <div class="modal-card batchDialog">
+            <div class="modal-title">批量重命名</div>
+            <div class="modal-body">
+                <div class="brMode">
+                    <label><input type="radio" name="brMode" value="seq" checked> 序号命名</label>
+                    <label><input type="radio" name="brMode" value="re"> 查找替换</label>
+                </div>
+                <div id="brSeqPanel">
+                    <div class="brField">模板 <input id="brTemplate" type="text" value="{n}_{name}"></div>
+                    <div class="brHint">占位符：{n} 序号 · {name} 原文件名（不含扩展名），扩展名自动保留</div>
+                    <div class="brField">起始 <input id="brStart" type="number" value="1" min="0"> 位数 <input id="brDigits" type="number" value="3" min="1" max="9"></div>
+                </div>
+                <div id="brRePanel" class="hidden">
+                    <div class="brField">查找（正则）<input id="brFind" type="text" placeholder="如：IMG_\d+"></div>
+                    <div class="brField">替换为 <input id="brReplace" type="text" placeholder="如：photo"></div>
+                </div>
+                <div class="brPreview" id="brPreview"></div>
+                <div class="brErr" id="brErr"></div>
+            </div>
+            <div class="modal-actions">
+                <button class="modal-btn" id="brCancel">取消</button>
+                <button class="modal-btn primary" id="brOk" disabled>执行重命名</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 设置面板（D） -->
+    <div class="modal-overlay hidden" id="settingsOverlay">
+        <div class="modal-card settingsCard">
+            <div class="settingsBrand">
+                <span class="settingsLogo"><img class="settingsLogoImg" src="./icon.png" alt="Emerald" draggable="false"></span>
+                <div>
+                    <div class="settingsName">Emerald</div>
+                    <div class="settingsSub">设置 · 本地优先 · 数据不出设备</div>
+                </div>
+            </div>
+            <div class="modal-body settingsBody">
+                <div class="settingsSection">
+                    <div class="settingsSecTitle">🎨 外观</div>
+                    <div class="brField">主题
+                        <select id="setThemeMode">
+                            <option value="light">亮色</option>
+                            <option value="dark">暗色</option>
+                            <option value="system">跟随系统</option>
+                        </select>
+                    </div>
+                    <div class="brField">默认排序
+                        <select id="setSortMode">
+                            <option value="name">按名称 A→Z</option>
+                            <option value="name-desc">按名称 Z→A</option>
+                            <option value="type">按类型</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="settingsSection">
+                    <div class="settingsSecTitle">🧹 数据</div>
+                    <div class="settingsBtnRow">
+                        <button class="modal-btn" id="setClearRecentFolders">清空最近文件夹</button>
+                        <button class="modal-btn" id="setClearRecentFiles">清空最近文件</button>
+                        <button class="modal-btn" id="setClearFavorites">清空收藏</button>
+                        <button class="modal-btn" id="setClearTags">清空当前工作区标签</button>
+                    </div>
+                </div>
+                <div class="settingsSection">
+                    <div class="settingsSecTitle">💾 备份</div>
+                    <div class="settingsBtnRow">
+                        <button class="modal-btn" id="setExportWorkspace">导出工作区备份…</button>
+                    </div>
+                </div>
+                <div class="settingsSection">
+                    <div class="settingsSecTitle">🧩 插件</div>
+                    <div class="brHint" id="setPluginInfo">未加载</div>
+                    <div class="settingsBtnRow">
+                        <button class="modal-btn" id="setReloadPlugins">重新加载插件</button>
+                        <button class="modal-btn" id="setOpenStore">打开插件商店…</button>
+                    </div>
+                </div>
+            </div>
+            <div class="settingsFooter">Emerald v1.0.0 · Electron 本地优先 · 阅读舒适</div>
+            <div class="modal-actions">
+                <button class="modal-btn primary" id="setOk">完成</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 插件商店（#14 扩展）：内置插件，安装到用户数据目录 plugins/ -->
+    <div class="modal-overlay hidden" id="pluginStore">
+        <div class="modal-card pluginStoreCard">
+            <div class="modal-title">🧩 插件商店</div>
+            <div class="storeSub">内置插件 · 安装后写入用户数据目录 plugins/，沙箱隔离运行</div>
+            <div class="pluginStoreList" id="pluginStoreList"></div>
+            <div class="modal-actions">
+                <button class="modal-btn" id="pluginStoreClose">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 文件拖放提示浮层（E） -->
+    <div class="dropOverlay" id="dropOverlay"><div class="dropText">📂 松手打开文件 / 文件夹</div></div>
+
+    <!-- 渲染进程脚本：解析器 → 高亮器 → 插件管理器 → 插件商店 → 主逻辑（顺序不能乱） -->
     <script src="./renderer/md-parser.js"></script>
     <script src="./renderer/highlighter.js"></script>
+    <script src="./renderer/plugin-manager.js"></script>
+    <script src="./renderer/plugin-store.js"></script>
     <script src="./renderer/app.js"></script>
 </body>
 </html>

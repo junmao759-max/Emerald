@@ -1,6 +1,9 @@
-const { BrowserWindow, app, ipcMain, dialog, shell } = require('electron')
+const { BrowserWindow, app, ipcMain, dialog, shell, safeStorage } = require('electron')
 const path = require('path')
 const fs = require('fs/promises')
+const { execFile } = require('child_process')
+const { promisify } = require('util')
+const execFileP = promisify(execFile)
 
 let mainWin
 let allowClose = false   // 用户确认关闭后置 true，放行第二次 close（配合 close 拦截）
@@ -12,6 +15,7 @@ function createMainWindow() {
         height: 800,
         resizable: true,
         frame: false,
+        icon: path.join(__dirname, 'icon.png'),   // 应用 Logo（窗口/任务栏）
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
@@ -119,15 +123,16 @@ ipcMain.handle('fs:readDir', async (_event, dirPath) => {
 ipcMain.handle('fs:readFile', async (_event, filePath) => {
     try {
         const content = await fs.readFile(filePath, 'utf-8')
-        return { ok: true, content }
+        return { ok: true, content: content.replace(/^\uFEFF/, '') }   // 剥离 UTF-8 BOM（Windows 编辑器常见）
     } catch (err) {
         return { ok: false, error: err.message }
     }
 })
 
-// 把内容写回磁盘（覆盖写入）
+// 把内容写回磁盘（覆盖写入；父目录不存在时自动创建，兼容插件写备份目录等场景）
 ipcMain.handle('fs:writeFile', async (_event, filePath, content) => {
     try {
+        await fs.mkdir(path.dirname(filePath), { recursive: true })
         await fs.writeFile(filePath, content, 'utf-8')
         return { ok: true }
     } catch (err) {
@@ -140,6 +145,60 @@ ipcMain.handle('fs:stat', async (_event, filePath) => {
     try {
         const s = await fs.stat(filePath)
         return { ok: true, size: s.size, mtimeMs: s.mtimeMs }
+    } catch (err) {
+        return { ok: false, error: err.message }
+    }
+})
+
+// 判断路径是否为文件夹（拖放打开时区分文件/文件夹）
+ipcMain.handle('fs:isDir', async (_event, targetPath) => {
+    try {
+        const s = await fs.stat(targetPath)
+        return { ok: true, isDir: s.isDirectory() }
+    } catch (err) {
+        return { ok: false, error: err.message }
+    }
+})
+
+// 导出工作区备份（H）：复制 .emerald 标签索引 + 生成文件清单 manifest.json
+ipcMain.handle('fs:exportWorkspace', async (_event, rootPath, destDir) => {
+    if (!rootPath || !destDir) return { ok: false, error: '参数不完整' }
+    try {
+        await fs.mkdir(destDir, { recursive: true })
+        // 1) 标签索引
+        let hasIndex = false
+        try {
+            const idxSrc = path.join(rootPath, '.emerald', 'index.json')
+            const st = await fs.stat(idxSrc)
+            if (st.isFile()) {
+                await fs.mkdir(path.join(destDir, '.emerald'), { recursive: true })
+                await fs.copyFile(idxSrc, path.join(destDir, '.emerald', 'index.json'))
+                hasIndex = true
+            }
+        } catch { /* 无索引文件则跳过 */ }
+        // 2) 文件清单（跳过隐藏项与 node_modules）
+        const files = []
+        const walk = async (dir) => {
+            let entries
+            try { entries = await fs.readdir(dir, { withFileTypes: true }) } catch { return }
+            for (const e of entries) {
+                if (e.name.startsWith('.') || e.name === 'node_modules') continue
+                const full = path.join(dir, e.name)
+                if (e.isDirectory()) await walk(full)
+                else if (e.isFile()) files.push(path.relative(rootPath, full).split('\\').join('/'))
+            }
+        }
+        await walk(rootPath)
+        const manifest = {
+            app: 'Emerald',
+            exportedAt: new Date().toISOString(),
+            rootName: path.basename(rootPath),
+            fileCount: files.length,
+            hasTagIndex: hasIndex,
+            files,
+        }
+        await fs.writeFile(path.join(destDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8')
+        return { ok: true, count: files.length, dest: destDir, hasIndex }
     } catch (err) {
         return { ok: false, error: err.message }
     }
@@ -230,6 +289,276 @@ ipcMain.handle('shell:openExternal', async (_event, url) => {
     } catch (err) {
         return { ok: false, error: err.message }
     }
+})
+
+/* ================================================================
+ * Git 集成（#10）：child_process 调 git，cwd 限定在工作区根目录，
+ * 参数一律走数组（execFile 不做 shell 解析，天然防注入）
+ * ================================================================ */
+
+// 安全执行 git；git 的 diff 类命令"有差异"时退出码为 1，视为正常结果
+// opts.timeout 可选：推送/拉取等网络操作给超时上限，防止无限挂起
+async function runGit(rootPath, args, opts) {
+    const options = { cwd: rootPath, maxBuffer: 16 * 1024 * 1024, windowsHide: true }
+    if (opts && opts.timeout) options.timeout = opts.timeout
+    try {
+        const { stdout } = await execFileP('git', args, options)
+        return { ok: true, stdout }
+    } catch (err) {
+        if (err.code === 1 && err.stdout) return { ok: true, stdout: err.stdout }   // diff 有差异
+        return { ok: false, error: (err.stderr || err.message || '').trim().slice(0, 300) }
+    }
+}
+
+// 相对路径合法性：拒绝绝对路径与 .. 逃逸
+function safeRelPath(p) {
+    if (typeof p !== 'string' || !p) return null
+    if (p.startsWith('/') || /^[a-zA-Z]:/.test(p) || p.split(/[\\/]/).includes('..')) return null
+    return p.split('\\').join('/')
+}
+
+// 工作区 git 状态：git status --porcelain=v1 -z → [{ rel, xy, code, badge }]
+ipcMain.handle('git:status', async (_event, rootPath) => {
+    if (!rootPath) return { ok: false, error: '无工作区' }
+    const r = await runGit(rootPath, ['status', '--porcelain=v1', '-z'])
+    if (!r.ok) return r
+    const entries = []
+    const parts = r.stdout.split('\0')
+    for (const p of parts) {
+        if (!p) continue
+        const xy = p.slice(0, 2)
+        let rel = p.slice(3)
+        const arrow = rel.indexOf(' -> ')
+        if (arrow !== -1) rel = rel.slice(arrow + 4)   // 重命名取新路径
+        if (rel.endsWith('/')) rel = rel.slice(0, -1)  // 未跟踪目录去掉尾部斜杠
+        const code = xy.trim() === '' ? '??' : xy.trim()
+        let badge = '?'
+        if (code === '??') badge = 'U'
+        else if (code.includes('D')) badge = 'D'
+        else if (code.includes('R')) badge = 'R'
+        else if (code.includes('C')) badge = 'C'
+        else if (code.includes('A')) badge = 'A'
+        else if (code.includes('M')) badge = 'M'
+        entries.push({ rel, xy, code, badge })
+    }
+    return { ok: true, entries }
+})
+
+// 当前分支名
+ipcMain.handle('git:branch', async (_event, rootPath) => {
+    if (!rootPath) return { ok: false, error: '无工作区' }
+    const r = await runGit(rootPath, ['branch', '--show-current'])
+    if (!r.ok) return r
+    return { ok: true, branch: r.stdout.trim() || 'HEAD' }
+})
+
+/* ---------------- 远程仓库（GitHub 等） ---------------- */
+
+// 远程仓库列表：git remote -v → [{ name, url, push }]
+ipcMain.handle('git:remote', async (_event, rootPath) => {
+    if (!rootPath) return { ok: false, error: '无工作区' }
+    const r = await runGit(rootPath, ['remote', '-v'])
+    if (!r.ok) return r
+    const remotes = []
+    for (const line of r.stdout.split('\n')) {
+        const m = /^(\S+)\s+(\S+)\s+\((fetch|push)\)$/.exec(line.trim())
+        if (!m) continue
+        let entry = remotes.find((x) => x.name === m[1])
+        if (!entry) { entry = { name: m[1], url: '', push: '' }; remotes.push(entry) }
+        if (m[3] === 'fetch') entry.url = m[2]
+        else entry.push = m[2]
+    }
+    return { ok: true, remotes }
+})
+
+// 链接 / 更换远程仓库（origin 不存在则 add，已存在则 set-url）
+ipcMain.handle('git:setRemote', async (_event, rootPath, name, url) => {
+    const n = String(name || 'origin').trim()
+    const u = String(url || '').trim()
+    if (!n || !u) return { ok: false, error: '远程名或地址为空' }
+    if (!/^(https?:\/\/|git@|ssh:\/\/|file:\/\/)/i.test(u)) return { ok: false, error: '地址看起来不像 git 仓库地址（如 https://github.com/用户名/仓库.git）' }
+    const list = await runGit(rootPath, ['remote'])
+    if (!list.ok) return list
+    const exists = list.stdout.split('\n').map((s) => s.trim()).includes(n)
+    if (exists) return runGit(rootPath, ['remote', 'set-url', n, u])
+    return runGit(rootPath, ['remote', 'add', n, u])
+})
+
+// 推送当前分支到远程（首次自动设置上游；网络操作给 3 分钟超时）
+ipcMain.handle('git:push', async (_event, rootPath, branch) => {
+    if (!rootPath) return { ok: false, error: '无工作区' }
+    const b = String(branch || '').trim() || 'HEAD'
+    return runGit(rootPath, ['push', '-u', 'origin', b], { timeout: 180000 })
+})
+
+// 从远程拉取（使用已设置的上游分支；2 分钟超时）
+ipcMain.handle('git:pull', async (_event, rootPath) => {
+    if (!rootPath) return { ok: false, error: '无工作区' }
+    return runGit(rootPath, ['pull'], { timeout: 120000 })
+})
+
+// 单文件差异（相对工作区根，包含已暂存 + 未暂存 vs HEAD）
+ipcMain.handle('git:diff', async (_event, rootPath, relPath) => {
+    if (!rootPath) return { ok: false, error: '无工作区' }
+    const rel = safeRelPath(relPath)
+    if (!rel) return { ok: false, error: '非法路径' }
+    const r = await runGit(rootPath, ['diff', 'HEAD', '--', rel])
+    if (!r.ok) return r
+    return { ok: true, diff: r.stdout }
+})
+
+// 暂存 / 取消暂存单个文件
+ipcMain.handle('git:stage', async (_event, rootPath, relPath) => {
+    const rel = safeRelPath(relPath)
+    if (!rel) return { ok: false, error: '非法路径' }
+    return runGit(rootPath, ['add', '--', rel])
+})
+ipcMain.handle('git:unstage', async (_event, rootPath, relPath) => {
+    const rel = safeRelPath(relPath)
+    if (!rel) return { ok: false, error: '非法路径' }
+    return runGit(rootPath, ['restore', '--staged', '--', rel])
+})
+
+// 暂存全部变更（未勾选任何文件时，提交前自动调用）
+ipcMain.handle('git:stageAll', async (_event, rootPath) => {
+    if (!rootPath) return { ok: false, error: '无工作区' }
+    return runGit(rootPath, ['add', '-A'])
+})
+
+// 提交（只提交已暂存内容）
+ipcMain.handle('git:commit', async (_event, rootPath, message) => {
+    if (!rootPath) return { ok: false, error: '无工作区' }
+    const msg = String(message || '').trim()
+    if (!msg) return { ok: false, error: '提交说明不能为空' }
+    if (msg.length > 200) return { ok: false, error: '提交说明过长（≤200 字）' }
+    return runGit(rootPath, ['commit', '-m', msg])
+})
+
+// 初始化仓库
+ipcMain.handle('git:init', async (_event, rootPath) => {
+    if (!rootPath) return { ok: false, error: '无工作区' }
+    return runGit(rootPath, ['init'])
+})
+
+/* ================================================================
+ * AI 助手（#12，BYO-Key 框架）：API Key 用 safeStorage 加密落盘，
+ * 请求在主进程发起（Key 不进渲染进程），SSE 流式回传渲染进程
+ * ================================================================ */
+
+const AI_CONFIG_FILE = 'emerald-ai.json'
+
+function aiConfigPath() {
+    return path.join(app.getPath('userData'), AI_CONFIG_FILE)
+}
+
+// 读取 AI 配置；key 字段用 safeStorage 加密，其余明文
+async function readAiConfig() {
+    const def = { provider: 'deepseek', baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat', key: '' }
+    try {
+        const raw = await fs.readFile(aiConfigPath(), 'utf-8')
+        const cfg = JSON.parse(raw)
+        if (cfg.key && safeStorage.isEncryptionAvailable()) {
+            try { cfg.key = safeStorage.decryptString(Buffer.from(cfg.key, 'base64')) } catch { cfg.key = '' }
+        }
+        return { ...def, ...cfg }
+    } catch {
+        return def
+    }
+}
+
+async function writeAiConfig(cfg) {
+    const out = { ...cfg }
+    if (out.key && safeStorage.isEncryptionAvailable()) {
+        out.key = safeStorage.encryptString(out.key).toString('base64')   // 加密落盘
+    } else if (out.key) {
+        return { ok: false, error: '系统安全存储不可用，无法安全保存 API Key' }
+    }
+    await fs.writeFile(aiConfigPath(), JSON.stringify(out, null, 2), 'utf-8')
+    return { ok: true }
+}
+
+ipcMain.handle('ai:getConfig', async () => readAiConfig())
+ipcMain.handle('ai:saveConfig', async (_e, cfg) => {
+    try {
+        if (!cfg || typeof cfg !== 'object') return { ok: false, error: '配置无效' }
+        return await writeAiConfig(cfg)
+    } catch (err) {
+        return { ok: false, error: err.message }
+    }
+})
+
+// 当前 AI 请求的控制器（支持取消）
+let aiAbort = null
+
+// 流式对话：从配置读取 Key，主进程 fetch OpenAI 兼容 /chat/completions（SSE）
+ipcMain.handle('ai:chat', async (event, messages) => {
+    const cfg = await readAiConfig()
+    if (!cfg.key) return { ok: false, error: '未配置 API Key（点标题栏 AI 图标 → 设置）' }
+    if (!Array.isArray(messages) || messages.length === 0) return { ok: false, error: '消息为空' }
+
+    const url = (cfg.baseUrl || '').replace(/\/+$/, '') + '/chat/completions'
+    const ctrl = new AbortController()
+    aiAbort = ctrl
+    try {
+        const resp = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + cfg.key,
+            },
+            body: JSON.stringify({
+                model: cfg.model || 'deepseek-chat',
+                messages,
+                stream: true,
+            }),
+            signal: ctrl.signal,
+        })
+        if (!resp.ok) {
+            const text = await resp.text().catch(() => '')
+            return { ok: false, error: 'AI 服务错误 ' + resp.status + '：' + text.slice(0, 200) }
+        }
+        // 解析 SSE 流
+        const reader = resp.body.getReader()
+        const decoder = new TextDecoder()
+        let buf = ''
+        while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buf += decoder.decode(value, { stream: true })
+            const lines = buf.split('\n')
+            buf = lines.pop()   // 最后一段可能不完整
+            for (const line of lines) {
+                const t = line.trim()
+                if (!t.startsWith('data:')) continue
+                const data = t.slice(5).trim()
+                if (data === '[DONE]') continue
+                try {
+                    const json = JSON.parse(data)
+                    const delta = json.choices && json.choices[0] && json.choices[0].delta
+                    if (delta && delta.content) {
+                        event.sender.send('ai:chunk', { text: delta.content })
+                    }
+                } catch { /* 忽略无法解析的片段 */ }
+            }
+        }
+        event.sender.send('ai:done', { ok: true })
+        return { ok: true }
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            event.sender.send('ai:done', { ok: true, aborted: true })
+            return { ok: true, aborted: true }
+        }
+        event.sender.send('ai:done', { ok: false, error: (err.message || '').slice(0, 200) })
+        return { ok: false, error: err.message }
+    } finally {
+        aiAbort = null
+    }
+})
+
+// 取消当前流式请求
+ipcMain.handle('ai:abort', async () => {
+    if (aiAbort) aiAbort.abort()
+    return { ok: true }
 })
 
 // 递归搜索文件名，最多 200 条结果。
@@ -329,6 +658,143 @@ ipcMain.handle('fs:searchContent', async (_event, rootPath, query) => {
         }
         await walk(rootPath)
         return { ok: true, results }
+    } catch (err) {
+        return { ok: false, error: err.message }
+    }
+})
+
+// 知识图谱（#13）：扫描工作区全部 Markdown，解析 [[wikilink]]，返回节点与边。
+// 节点 = 每个 .md 文件（rel 为 posix 相对路径）；边 = 文件 A 中 [[目标]] 指向文件 B。
+// 保护性限制：最多遍历 400 个 md（布局为 O(n²)，超限截断）、单文件 ≤ 512KB、跳过二进制。
+ipcMain.handle('fs:scanLinks', async (_event, rootPath) => {
+    try {
+        const nodes = []            // { rel, name }
+        const links = []            // { from: rel, to: rel }
+        const nameIndex = new Map() // 小写 basename(去.md) → [rel, ...]（同名多文件）
+        const pathIndex = new Map() // 小写 rel(去.md) → rel（支持 [[子目录/笔记]]）
+        const MAX_NODES = 400
+        let visited = 0
+
+        const walk = async (dir) => {
+            if (nodes.length >= MAX_NODES) return
+            let entries
+            try {
+                entries = await fs.readdir(dir, { withFileTypes: true })
+            } catch {
+                return
+            }
+            for (const e of entries) {
+                if (nodes.length >= MAX_NODES) return
+                if (e.name.startsWith('.')) continue
+                if (e.name === 'node_modules') continue
+                const full = path.join(dir, e.name)
+                if (e.isDirectory()) {
+                    await walk(full)
+                    continue
+                }
+                if (!e.isFile() || !/\.md$/i.test(e.name)) continue
+                if (++visited > 2000) return
+                const rel = path.relative(rootPath, full).split(path.sep).join('/')
+                nodes.push({ rel, name: e.name })
+                const lowerName = e.name.replace(/\.md$/i, '').toLowerCase()
+                if (!nameIndex.has(lowerName)) nameIndex.set(lowerName, [])
+                nameIndex.get(lowerName).push(rel)
+                pathIndex.set(rel.replace(/\.md$/i, '').toLowerCase(), rel)
+            }
+        }
+        await walk(rootPath)
+
+        // [[目标]] 解析：优先精确路径（含 /），否则按 basename 匹配（取同名第一个）
+        const resolveTarget = (raw) => {
+            const t = String(raw || '').trim()
+            if (!t) return null
+            const clean = t.replace(/\.md$/i, '')
+            if (clean.includes('/')) {
+                const hit = pathIndex.get(clean.toLowerCase())
+                if (hit) return hit
+            }
+            const arr = nameIndex.get(clean.toLowerCase())
+            return arr && arr.length ? arr[0] : null
+        }
+
+        for (const n of nodes) {
+            const abs = path.join(rootPath, n.rel.split('/').join(path.sep))
+            let content
+            try {
+                const s = await fs.stat(abs)
+                if (s.size > 512 * 1024) continue
+                content = await fs.readFile(abs, 'utf-8')
+            } catch {
+                continue
+            }
+            if (content.indexOf('\x00') !== -1) continue
+            // [[目标]] / [[目标#锚点]] / [[目标|显示名]] / [[目标.md]]
+            const re = /\[\[([^\[\]|#]+)(?:#[^\[\]|]*)?(?:\|[^\[\]]*)?\]\]/g
+            let m
+            while ((m = re.exec(content)) !== null) {
+                const to = resolveTarget(m[1])
+                if (to && to !== n.rel) links.push({ from: n.rel, to })
+            }
+        }
+        return { ok: true, nodes, links, truncated: nodes.length >= MAX_NODES }
+    } catch (err) {
+        return { ok: false, error: err.message }
+    }
+})
+
+// 插件系统（#14）：加载用户脚本。
+// 来源：用户数据目录 plugins/（全局）+ 工作区 .emerald/plugins/（项目内）。
+// 返回每个 .js 文件的源码，渲染进程在 iframe 沙箱里执行（隔离）。
+ipcMain.handle('fs:loadPlugins', async (_event, rootPath) => {
+    try {
+        const dirs = []
+        dirs.push({ dir: path.join(app.getPath('userData'), 'plugins'), scope: 'user' })
+        if (rootPath) dirs.push({ dir: path.join(rootPath, '.emerald', 'plugins'), scope: 'workspace' })
+        const plugins = []
+        for (const { dir, scope } of dirs) {
+            let entries
+            try {
+                entries = await fs.readdir(dir, { withFileTypes: true })
+            } catch {
+                continue // 目录不存在则跳过
+            }
+            for (const e of entries) {
+                if (!e.isFile() || !/\.js$/i.test(e.name)) continue
+                const full = path.join(dir, e.name)
+                try {
+                    const content = await fs.readFile(full, 'utf-8')
+                    plugins.push({ name: e.name, path: full, content, scope })
+                } catch {
+                    // 读不了的插件跳过
+                }
+            }
+        }
+        return { ok: true, plugins }
+    } catch (err) {
+        return { ok: false, error: err.message }
+    }
+})
+
+// 插件商店：安装（写文件到用户数据目录 plugins/）+ 卸载（删除文件）
+ipcMain.handle('fs:installPlugin', async (_event, fileName, content) => {
+    try {
+        const safe = String(fileName || '').replace(/[^a-zA-Z0-9._-]/g, '_')
+        if (!/\.js$/i.test(safe)) return { ok: false, error: '文件名必须以 .js 结尾' }
+        const dir = path.join(app.getPath('userData'), 'plugins')
+        await fs.mkdir(dir, { recursive: true })
+        await fs.writeFile(path.join(dir, safe), String(content), 'utf-8')
+        return { ok: true }
+    } catch (err) {
+        return { ok: false, error: err.message }
+    }
+})
+
+ipcMain.handle('fs:uninstallPlugin', async (_event, fileName) => {
+    try {
+        const safe = String(fileName || '').replace(/[^a-zA-Z0-9._-]/g, '_')
+        const full = path.join(app.getPath('userData'), 'plugins', safe)
+        await fs.rm(full, { force: true })
+        return { ok: true }
     } catch (err) {
         return { ok: false, error: err.message }
     }

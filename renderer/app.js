@@ -59,6 +59,17 @@ function setActivePane(i) {
     const pane = state.panes[i]
     if (pane) state.viewMode = pane.viewMode || 'edit'
     syncActiveTabId()
+    // 切到该面板时把视图刷为该标签最新内容：防止"双面板显示同一标签"时，
+    // 旧面板的陈旧 textarea 在后续输入时整段回写覆盖新内容
+    if (pane && pane.tabId) {
+        const tab = state.tabs.find((t) => t.id === pane.tabId)
+        if (tab && typeof tab.content === 'string') {
+            const P = paneEls(i)
+            if (P.editor.value !== tab.content) P.editor.value = tab.content
+            if (!P.liveEditor.classList.contains('hidden')) renderLiveEditor(i)
+            else updateSaveStatus(i)
+        }
+    }
     document.querySelectorAll('.pane').forEach((p) => p.classList.toggle('pane-active', Number(p.dataset.pane) === i))
     updateStatusBar()
 }
@@ -291,6 +302,18 @@ function showNotice(msg) {
 // ================================================================
 // 插件系统（#14）：注入 PluginManager 的 API 实现 + 命令面板/设置联动
 // ================================================================
+
+// 插件文件权限边界：只允许读写当前工作区（及其子目录）内的路径。
+// 工作区 .emerald/plugins 可能来自克隆的仓库，限制后恶意插件无法读走用户任意文件或覆盖应用自身。
+function assertPluginPathAllowed(p) {
+    const root = state.rootPath
+    if (!root) throw new Error('没有打开工作区')
+    const abs = String(p || '')
+    if (!(abs === root || abs.startsWith(root + '\\') || abs.startsWith(root + '/'))) {
+        throw new Error('插件只能访问工作区内的文件')
+    }
+}
+
 PluginManager.api = {
     showNotice: (msg) => showNotice(msg),
     getCurrentFile: () => {
@@ -301,18 +324,22 @@ PluginManager.api = {
     getWorkspace: () => ({ path: state.rootPath }),
     openFile: async (p) => {
         if (!p) throw new Error('openFile: 路径为空')
+        assertPluginPathAllowed(p)
         await openFileByPath(String(p))
     },
     readFile: async (p) => {
+        assertPluginPathAllowed(p)
         const r = await window.electronAPI.readFile(String(p))
         if (!r.ok) throw new Error(r.error || '读取失败')
         return r.content
     },
     writeFile: async (p, c) => {
+        assertPluginPathAllowed(p)
         const r = await window.electronAPI.writeFile(String(p), String(c))
         if (!r.ok) throw new Error(r.error || '写入失败')
     },
     readDir: async (p) => {
+        assertPluginPathAllowed(p)
         const r = await window.electronAPI.readDir(String(p))
         if (!r.ok) throw new Error(r.error || '读取目录失败')
         return r.items
@@ -661,6 +688,27 @@ function basename(p) {
 }
 function joinPath(...parts) {
     return parts.join('\\')
+}
+
+// 把 file:// URL 转成本地路径（容错：支持 file:///C:/x、file://C:/x、file://localhost/C:/x 形态；
+// 解码失败（URL 含未编码 % 等）返回 null，由调用方跳过该条，不影响其余处理）
+function fileUrlToPath(url) {
+    const s = String(url || '')
+    let p = null
+    // 形态1：Windows 盘符（file:///C:/x / file://C:/x / file://localhost/C:/x）
+    let m = /^file:\/\/(?:localhost\/)?\/?([A-Za-z]:[\\/])(.*)$/.exec(s)
+    if (m) p = m[1] + m[2]
+    else {
+        // 形态2：Unix 绝对路径（file:///home/x）
+        m = /^file:\/\/(?:localhost\/)?(\/.*)$/.exec(s)
+        if (m) p = m[1]
+    }
+    if (p === null) return null
+    try {
+        return decodeURIComponent(p).split('/').join('\\')
+    } catch {
+        return null
+    }
 }
 
 // 转义 HTML：任何要拼进 innerHTML 的文本都必须先过这里（防 XSS）
@@ -1338,7 +1386,7 @@ function handleLiveEditorClick(e) {
         const href = link.getAttribute('href')
         if (/^(https?:|mailto:)/i.test(href)) { window.electronAPI.openExternal(href); return }
         let target = null
-        if (/^file:/i.test(href)) target = decodeURIComponent(href.replace(/^file:\/\/\//i, '')).split('/').join('\\')
+        if (/^file:/i.test(href)) target = fileUrlToPath(href)
         else if (!/^[a-zA-Z]+:/.test(href)) { const f = state.currentFile; if (f) target = joinPath(parentDir(f.path), href) }
         if (target) openLocalPath(target)
         return
@@ -1601,7 +1649,7 @@ function handlePreviewClick(e) {
         }
         let target = null
         if (/^file:/i.test(href)) {
-            target = decodeURIComponent(href.replace(/^file:\/\/\//i, '')).split('/').join('\\')
+            target = fileUrlToPath(href)
         } else if (!/^[a-zA-Z]+:/.test(href)) {
             const f = state.currentFile
             if (f) target = joinPath(parentDir(f.path), href)   // 相对路径按当前文件目录解析
@@ -1784,6 +1832,9 @@ function hideAllStates() {
     els.gitPanel.classList.add('hidden')
     els.aiPanel.classList.add('hidden')
     closeGraph()   // 知识图谱（#13）：关闭并停止模拟
+    closeQuickSwitcher()   // 避免浮层残留盖在打开的面板上
+    closeCommandPalette()
+    closeFindBar()   // 查找条是 editorPane 子元素，切到其它面板时清理，防止回来时残留陈旧状态
     currentPdfPath = null
 }
 
@@ -1993,6 +2044,12 @@ async function restoreSession() {
     }
     state.cursorLine = session.cursorLine || 1
     state.cursorCol = session.cursorCol || 1
+    // 恢复面板视图模式（会话保存了 viewMode；不应用则状态栏与视图不一致）
+    if (state.panes[0]) state.panes[0].viewMode = state.viewMode
+    if (state.currentFile) {
+        if (state.viewMode === 'preview') showPanePreview(0)
+        else showPaneEditorInput(0)
+    }
     updateStatusBar()
     revealLine(state.cursorLine) // 真正把光标还原到上次位置（而不只是状态栏显示）
     els.launchScreen.classList.add('hidden')
@@ -2037,11 +2094,15 @@ async function enterDirectory(path) {
     // 旧工作区的标签、历史、展开状态对新目录无意义，全部重置
     state.tabs = []
     state.activeTabId = null
+    state.activeTag = null            // 清标签筛选，避免旧标签过滤新工作区
     state.expanded.clear()
     state.history = []
     state.historyIndex = -1
     state.searchResults = []
+    if (state.panes.length > 1) unsplitPane()   // 切换工作区回到单面板，避免分屏残留悬空
     updateNavBtns()
+    renderTags()
+    renderTagFilter()
     renderTabs()
     await loadRoot()
     recordRecentFolder(path)
@@ -2075,6 +2136,8 @@ async function loadRoot() {
     await loadTags()   // 标签索引随工作区一起加载（.emerald/index.json）
     await loadGitStatus()   // Git 状态随工作区加载（树徽章）
     await loadPluginsForWorkspace()   // 插件随工作区加载（#14）
+    // 图谱开着时重扫（切换工作区/刷新后数据已变）
+    if (!els.graphPanel.classList.contains('hidden')) loadGraph()
 }
 
 // B4：首次使用引导条——只在首次进入工作区时显示一次，关闭后记住
@@ -2336,6 +2399,18 @@ async function createNewFolder(dir) {
     await refreshDir(dir)
 }
 
+// 标签被移除（重命名/删除）后：把仍指向已移除标签的面板退回相邻标签 / 空白
+function fixPanesAfterTabsRemoved() {
+    for (let i = 0; i < state.panes.length; i++) {
+        const id = state.panes[i].tabId
+        if (id && !state.tabs.some((t) => t.id === id)) {
+            state.panes[i].tabId = state.tabs.length ? state.tabs[0].id : null
+        }
+    }
+    syncActiveTabId()
+}
+
+// 重命名文件 / 文件夹
 async function renameItem(item) {
     const newName = await window.prompt('新名称：', item.name)
     if (!newName || newName === item.name) return
@@ -2345,6 +2420,7 @@ async function renameItem(item) {
     if (!res.ok) { alert('重命名失败：' + res.error); return }
     // 关闭指向旧路径的标签（重命名后路径变了）
     state.tabs = state.tabs.filter((t) => t.path !== item.path)
+    fixPanesAfterTabsRemoved()   // 分屏面板里若显示被改名文件，退回相邻标签 / 空白
     if (state.activeTabId === item.path) {
         state.activeTabId = state.tabs[0] ? state.tabs[0].id : null
     }
@@ -2369,6 +2445,7 @@ async function deleteItem(item) {
     // 关闭该文件及其子文件的所有标签
     const prefix = item.path + '\\'
     state.tabs = state.tabs.filter((t) => t.path !== item.path && !t.path.startsWith(prefix))
+    fixPanesAfterTabsRemoved()   // 分屏面板里若显示被删文件，退回相邻标签 / 空白
     if (state.tabs.length) {
         if (!state.tabs.some((t) => t.id === state.activeTabId)) {
             state.activeTabId = state.tabs[0].id
@@ -2977,6 +3054,7 @@ els.gitMsgInput.addEventListener('keydown', (e) => {
 
 function openQuickSwitcher() {
     if (!state.rootPath) return
+    closeCommandPalette()   // 与命令面板互斥，避免双浮层叠加
     els.quickSwitcher.classList.remove('hidden')
     els.qsInput.value = ''
     els.qsResults.innerHTML = ''
@@ -3188,6 +3266,7 @@ let cpFiltered = []   // 当前过滤后的命令
 let cpIndex = 0       // 当前高亮索引
 
 function openCommandPalette() {
+    closeQuickSwitcher()   // 与快速切换器互斥，避免双浮层叠加
     els.commandPalette.classList.remove('hidden')
     els.cpInput.value = ''
     els.cpInput.focus()
@@ -3554,6 +3633,7 @@ function escapeRegExp(s) {
 // 打开 / 聚焦查找条；打开前把活动面板文本框内容同步为 f.content
 function openFindBar() {
     if (!state.currentFile) return
+    if (els.editorPane.classList.contains('hidden')) return   // 编辑器不可见（Git/AI/图谱面板）时不打开，避免焦点投到隐藏元素
     els.findBar.classList.remove('hidden')
     curPaneEls().editor.value = state.currentFile.content   // 同步（实时编辑模式下文本框可能过期）
     els.findInput.focus()
@@ -3976,13 +4056,17 @@ window.electronAPI.onAiDone((d) => {
 
 // 设置对话框：读取 / 填写 / 保存
 async function openAiSettings() {
-    const cfg = await window.electronAPI.aiGetConfig()
+    const r = await window.electronAPI.aiGetConfig()
+    const cfg = r.config || {}
     els.aiProvider.value = cfg.provider || 'deepseek'
     els.aiBaseUrl.value = cfg.baseUrl || ''
     els.aiModel.value = cfg.model || ''
-    els.aiKey.value = cfg.key || ''
+    // Key 只存在于主进程：已配置时显示占位符（留空 = 保存时保留旧 Key）
+    els.aiKey.value = ''
+    els.aiKey.placeholder = cfg.keySet ? '已保存（sk-••••••••，留空则不修改）' : 'sk-...（safeStorage 加密保存）'
+    if (cfg.keyInvalid) els.aiCfgErr.textContent = '系统安全存储不可用，旧 Key 无法解密，请重新输入'
+    else els.aiCfgErr.textContent = ''
     applyAiPreset()
-    els.aiCfgErr.textContent = ''
     els.aiSettingsOverlay.classList.remove('hidden')
 }
 
@@ -4106,10 +4190,9 @@ document.addEventListener('drop', async (e) => {
     }
     // 2) 兜底：text/uri-list / text/plain 里的 file:// URL（某些应用拖出时没有 File 对象）
     const uriText = dt.getData('text/uri-list') || dt.getData('text/plain') || ''
-    const uris = uriText.split('\n').map((s) => s.trim()).filter((s) => s && /^file:\/\//i.test(s))
-    for (const uri of uris) {
-        const p = decodeURIComponent(uri.replace(/^file:\/\/\//i, '')).split('/').join('\\')
-        if (p) await openDroppedPath(p)
+    for (const uri of uriText.split('\n').map((s) => s.trim()).filter((s) => s && /^file:/i.test(s))) {
+        const p = fileUrlToPath(uri)
+        if (p) await openDroppedPath(p)   // 单条解析失败跳过，不影响其余 URI
     }
 })
 
@@ -4321,6 +4404,7 @@ let graphSimSteps = 0           // 已迭代步数
 let graphSimDone = false        // 布局收敛 / 达上限
 let graphView = { scale: 1, tx: 0, ty: 0 }   // 屏幕变换：screen = world * scale + t
 let graphRAF = null
+let graphLoadToken = 0   // 加载令牌：扫描期间关闭/重扫时使在途 loadGraph 失效（防止 rAF 空转泄漏）
 let graphDrag = null            // { idx, moved, lastX, lastY }
 let graphPan = null             // 空白处拖动平移 { lastX, lastY }
 let graphHover = -1             // 悬停节点（高亮）
@@ -4343,6 +4427,7 @@ function openGraph() {
 }
 
 function closeGraph() {
+    graphLoadToken++   // 使在途 loadGraph 失效：不再启动模拟/重绘
     if (graphRAF) { cancelAnimationFrame(graphRAF); graphRAF = null }
     graphDrag = null
     graphPan = null
@@ -4352,10 +4437,12 @@ function closeGraph() {
 
 // 重新扫描：从主进程拿节点/边，构建模拟数据并启动布局
 async function loadGraph() {
+    const token = ++graphLoadToken
     els.graphLoading.classList.remove('hidden')
     els.graphEmpty.classList.add('hidden')
     els.graphStats.textContent = ''
     const res = await window.electronAPI.scanLinks(state.rootPath)
+    if (token !== graphLoadToken) return   // 扫描期间图谱被关闭 / 重新扫描
     els.graphLoading.classList.add('hidden')
     if (!res.ok) {
         els.graphEmpty.textContent = '扫描失败：' + (res.error || '未知错误')
@@ -4698,7 +4785,7 @@ els.graphCanvas.addEventListener('dblclick', (e) => {
 })
 
 els.graphRefreshBtn.addEventListener('click', loadGraph)
-els.graphCloseBtn.addEventListener('click', closeGraph)
+els.graphCloseBtn.addEventListener('click', () => { closeGraph(); renderActiveFile() })   // 关闭后恢复之前视图（与 Git 面板一致）
 els.graphBtn.addEventListener('click', () => (els.graphPanel.classList.contains('hidden') ? openGraph() : closeGraph()))
 // 打开工作区 / 刷新时若图谱开着则重扫（数据可能已变）
 window.addEventListener('resize', () => { if (!els.graphPanel.classList.contains('hidden')) drawGraph() })
@@ -4767,6 +4854,7 @@ document.getElementById('closewindow').addEventListener('click', () => window.el
 // 主进程请求确认关闭：有未保存修改就弹自研确认框，确认后放行关闭。
 // 覆盖所有关闭途径：关闭按钮 / Alt+F4 / 任务栏
 window.electronAPI.onConfirmClose(async () => {
+    if (liveEditingBlk && document.body.contains(liveEditingBlk)) commitBlockEdit(liveEditingBlk)   // 先把未提交的块编辑落进 content
     if (anyDirty()) {
         const ok = await window.confirm('有文件未保存，确定退出吗？')
         if (!ok) return
@@ -4778,7 +4866,22 @@ window.addEventListener('beforeunload', saveSession)  // 兜底：系统方式�
 
 // 全局按键：点击别处 / 按 Esc 关闭右键菜单
 document.addEventListener('click', hideContextMenu)
-document.addEventListener('contextmenu', (e) => e.preventDefault()) // 全局禁用浏览器原生菜单
+// 输入框提供标准编辑右键菜单（剪切/复制/粘贴/全选）；其余区域仍禁用原生菜单
+document.addEventListener('contextmenu', (e) => {
+    const t = e.target
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') && t.selectionStart !== undefined) {
+        e.preventDefault()
+        const hasSel = t.selectionEnd > t.selectionStart
+        const items = []
+        if (hasSel) items.push({ label: '✂️ 剪切', action: () => { t.focus(); document.execCommand('cut') } })
+        if (hasSel) items.push({ label: '⧉ 复制', action: () => { t.focus(); document.execCommand('copy') } })
+        items.push({ label: '📋 粘贴', action: () => { t.focus(); document.execCommand('paste') } })
+        items.push({ label: '☑ 全选', action: () => { t.focus(); t.select() } })
+        if (items.length) showContextMenu(e.clientX, e.clientY, items)
+        return
+    }
+    e.preventDefault() // 全局禁用浏览器原生菜单
+})
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         if (!els.quickSwitcher.classList.contains('hidden')) closeQuickSwitcher()
@@ -4804,6 +4907,22 @@ els.editor.addEventListener('contextmenu', (e) => {
 // 快捷键（capture 阶段：块编辑 textarea 会 stopPropagation，冒泡监听收不到 Ctrl+Shift+P 等）
 document.addEventListener('keydown', (e) => {
     const mod = e.ctrlKey || e.metaKey
+    // 弹层打开时全局快捷键不干预（避免 Ctrl+W 嵌套 confirm 挂起、Ctrl+P 在模态框背后开浮层）
+    const modalOpen = !!document.getElementById('modalOverlay') && !document.getElementById('modalOverlay').classList.contains('hidden')
+        || !!(els.settingsOverlay && !els.settingsOverlay.classList.contains('hidden'))
+        || !!(els.aiSettingsOverlay && !els.aiSettingsOverlay.classList.contains('hidden'))
+        || !!(els.batchDialogOverlay && !els.batchDialogOverlay.classList.contains('hidden'))
+        || !!document.getElementById('pluginStore') && !document.getElementById('pluginStore').classList.contains('hidden')
+    if (modalOpen) return
+    // 块编辑未提交时，Ctrl+S / Ctrl+W 先把块内容提交进 content，避免写旧版本或静默丢编辑
+    if (mod && liveEditingBlk && document.body.contains(liveEditingBlk)
+        && (e.key.toLowerCase() === 's' || e.key.toLowerCase() === 'w')) {
+        commitBlockEdit(liveEditingBlk)
+    }
+    // 切换器 / 命令面板 / Git 面板输入框聚焦时，除 Esc 与 Ctrl+P / Ctrl+Shift+P 外全局键不生效
+    const t = e.target
+    const inFloating = t && t.closest && t.closest('#quickSwitcher, #commandPalette, #gitPanel')
+    if (inFloating && !(mod && e.key.toLowerCase() === 'p')) return
     if (mod && e.shiftKey && e.key.toLowerCase() === 'p') {
         e.preventDefault()          // Ctrl+Shift+P：命令面板
         openCommandPalette()

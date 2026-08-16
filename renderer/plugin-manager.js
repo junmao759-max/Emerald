@@ -68,16 +68,22 @@
         _pending: new Map(),        // reqId → resolve（插件 API 请求）
         _reqSeq: 0,
         _onChange: null,            // 命令列表变化回调（app.js 设置：重渲染命令面板 + 插件列表）
+        _loadToken: 0,              // load 并发令牌：旧请求 resolve 后校验令牌失效则丢弃，避免重复加载
+        _lastRoot: null,            // 最近一次 load 的 rootPath（reload() 复用）
 
         async load(rootPath) {
+            const token = ++this._loadToken
             this.unload()
+            this._lastRoot = rootPath || null
             let res
             try {
                 res = await window.electronAPI.loadPlugins(rootPath)
             } catch (err) {
+                if (token !== this._loadToken) return   // 已被更新的 load 取代
                 this._notify()
                 return
             }
+            if (token !== this._loadToken) return       // 期间又触发了新的 load：丢弃本次结果
             if (!res.ok) { this._notify(); return }
             for (const p of (res.plugins || [])) {
                 this._spawn(p)
@@ -111,10 +117,9 @@
             }
         },
 
-        // 重新加载（刷新工作区后调用）
+        // 重新加载（沿用最近一次 load 的 rootPath）
         reload() {
-            const root = window.__pluginRootPath || ''
-            this.load(root)
+            this.load(this._lastRoot)
         },
 
         _spawn(p) {
@@ -147,6 +152,9 @@
 
     // —— 主应用侧：接收插件消息（注册命令 / API 请求 / 错误）——
     window.addEventListener('message', (e) => {
+        // 双重校验：来源必须是已知插件的 contentWindow，且 origin 为沙箱 iframe 的 opaque origin（'null'）。
+        // 防止插件 iframe 被导航到外部页面后复用插件 API 权限。
+        if (e.origin !== 'null') return
         const entry = PluginManager._iframes.find((f) => f.win === e.source)
         if (!entry) return   // 来源不是已知插件 → 忽略
         const d = e.data || {}

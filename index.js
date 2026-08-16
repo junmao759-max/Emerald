@@ -24,11 +24,18 @@ function createMainWindow() {
     mainWin.webContents.on('did-finish-load', () => { pageLoaded = true })
 
     // 安全网（B1）：任何让应用窗口离开本应用的导航都拦下来。
-    // 预览里点普通 Markdown 链接（http/https/mailto）→ 系统浏览器打开，而不是把整个应用导航走
+    // 只放行本应用自身页面（file:// 且路径在 __dirname 下）；
+    // http/https/mailto → 系统浏览器打开；其它（file:/data: 等任意本地文件）一律阻止，
+    // 防止窗口被导航到任意本地 HTML 而让该页面持有完整 electronAPI。
     mainWin.webContents.on('will-navigate', (e, url) => {
-        if (!/^(https?:|mailto:)/i.test(url)) return   // file:// 内部页面放行
+        if (/^file:/i.test(url)) {
+            const filePath = decodeURIComponent(url.replace(/^file:\/\/\//i, '').split('?')[0]).split('/').join('\\')
+            if (path.resolve(filePath).startsWith(path.resolve(__dirname) + '\\')) return   // 应用自身页面放行
+            e.preventDefault()
+            return
+        }
+        if (/^(https?:|mailto:)/i.test(url)) { e.preventDefault(); shell.openExternal(url); return }
         e.preventDefault()
-        shell.openExternal(url)
     })
     // 新窗口请求（target=_blank 等）一律拒绝，外链转系统浏览器
     mainWin.webContents.setWindowOpenHandler(({ url }) => {
@@ -176,7 +183,7 @@ ipcMain.handle('fs:exportWorkspace', async (_event, rootPath, destDir) => {
                 hasIndex = true
             }
         } catch { /* 无索引文件则跳过 */ }
-        // 2) 文件清单（跳过隐藏项与 node_modules）
+        // 2) 文件清单（跳过隐藏项与 node_modules；destDir 若在工作区内则跳过自身，防止备份被计入清单）
         const files = []
         const walk = async (dir) => {
             let entries
@@ -184,6 +191,8 @@ ipcMain.handle('fs:exportWorkspace', async (_event, rootPath, destDir) => {
             for (const e of entries) {
                 if (e.name.startsWith('.') || e.name === 'node_modules') continue
                 const full = path.join(dir, e.name)
+                // 跳过目标备份目录本身（及工作区外目标）
+                if (path.resolve(full) === path.resolve(destDir)) continue
                 if (e.isDirectory()) await walk(full)
                 else if (e.isFile()) files.push(path.relative(rootPath, full).split('\\').join('/'))
             }
@@ -252,6 +261,11 @@ ipcMain.handle('fs:delete', async (_event, targetPath) => {
 // 复制（fs.cp 同时支持单文件与整个文件夹，recursive 递归拷贝）
 ipcMain.handle('fs:copy', async (_event, srcPath, destPath) => {
     try {
+        // 环路检测：禁止把文件夹复制进它自己的子目录（否则 fs.cp 递归复制到路径爆炸）
+        const rel = path.relative(srcPath, destPath)
+        if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+            return { ok: false, error: '不能把文件夹复制到它自己的子目录中' }
+        }
         await fs.cp(srcPath, destPath, { recursive: true })
         return { ok: true }
     } catch (err) {
@@ -296,7 +310,8 @@ ipcMain.handle('shell:openExternal', async (_event, url) => {
  * 参数一律走数组（execFile 不做 shell 解析，天然防注入）
  * ================================================================ */
 
-// 安全执行 git；git 的 diff 类命令"有差异"时退出码为 1，视为正常结果
+// 安全执行 git；仅 diff 类命令"有差异"时退出码为 1（opts.allowExit1），视为正常结果
+// 其余命令退出码非 0 一律按失败处理（如 git pull 合并冲突时退出码 1 且冲突输出在 stdout，不能误报成功）
 // opts.timeout 可选：推送/拉取等网络操作给超时上限，防止无限挂起
 async function runGit(rootPath, args, opts) {
     const options = { cwd: rootPath, maxBuffer: 16 * 1024 * 1024, windowsHide: true }
@@ -305,7 +320,7 @@ async function runGit(rootPath, args, opts) {
         const { stdout } = await execFileP('git', args, options)
         return { ok: true, stdout }
     } catch (err) {
-        if (err.code === 1 && err.stdout) return { ok: true, stdout: err.stdout }   // diff 有差异
+        if (opts && opts.allowExit1 && err.code === 1 && err.stdout) return { ok: true, stdout: err.stdout }
         return { ok: false, error: (err.stderr || err.message || '').trim().slice(0, 300) }
     }
 }
@@ -402,7 +417,7 @@ ipcMain.handle('git:diff', async (_event, rootPath, relPath) => {
     if (!rootPath) return { ok: false, error: '无工作区' }
     const rel = safeRelPath(relPath)
     if (!rel) return { ok: false, error: '非法路径' }
-    const r = await runGit(rootPath, ['diff', 'HEAD', '--', rel])
+    const r = await runGit(rootPath, ['diff', 'HEAD', '--', rel], { allowExit1: true })
     if (!r.ok) return r
     return { ok: true, diff: r.stdout }
 })
@@ -457,8 +472,14 @@ async function readAiConfig() {
     try {
         const raw = await fs.readFile(aiConfigPath(), 'utf-8')
         const cfg = JSON.parse(raw)
-        if (cfg.key && safeStorage.isEncryptionAvailable()) {
-            try { cfg.key = safeStorage.decryptString(Buffer.from(cfg.key, 'base64')) } catch { cfg.key = '' }
+        if (cfg.key) {
+            if (safeStorage.isEncryptionAvailable()) {
+                try { cfg.key = safeStorage.decryptString(Buffer.from(cfg.key, 'base64')) } catch { cfg.key = ''; cfg.keyInvalid = true }
+            } else {
+                // 加密不可用时绝不能把密文当明文 Key 用（会 401 且设置框显示密文）
+                cfg.key = ''
+                cfg.keyInvalid = true
+            }
         }
         return { ...def, ...cfg }
     } catch {
@@ -477,11 +498,33 @@ async function writeAiConfig(cfg) {
     return { ok: true }
 }
 
-ipcMain.handle('ai:getConfig', async () => readAiConfig())
+// 读取配置给渲染进程：绝不返回明文 Key，只给 keySet 标志（Key 只存在于主进程）
+ipcMain.handle('ai:getConfig', async () => {
+    const cfg = await readAiConfig()
+    return {
+        ok: true,
+        config: {
+            provider: cfg.provider,
+            baseUrl: cfg.baseUrl,
+            model: cfg.model,
+            keySet: !!cfg.key,
+            keyInvalid: !!cfg.keyInvalid,
+        },
+    }
+})
+
 ipcMain.handle('ai:saveConfig', async (_e, cfg) => {
     try {
         if (!cfg || typeof cfg !== 'object') return { ok: false, error: '配置无效' }
-        return await writeAiConfig(cfg)
+        const prev = await readAiConfig()
+        const next = {
+            provider: cfg.provider || prev.provider,
+            baseUrl: cfg.baseUrl || prev.baseUrl,
+            model: cfg.model || prev.model,
+            // 渲染进程传空 key = 保留旧 Key；传新 key 才替换
+            key: typeof cfg.key === 'string' && cfg.key.trim() ? cfg.key : prev.key,
+        }
+        return await writeAiConfig(next)
     } catch (err) {
         return { ok: false, error: err.message }
     }
@@ -499,6 +542,8 @@ ipcMain.handle('ai:chat', async (event, messages) => {
     const url = (cfg.baseUrl || '').replace(/\/+$/, '') + '/chat/completions'
     const ctrl = new AbortController()
     aiAbort = ctrl
+    // 整体超时：SSE 中途挂起（收到 headers 后不再吐数据）时 120s 强制结束，避免 invoke 永久 pending
+    const hardTimer = setTimeout(() => ctrl.abort(), 120000)
     try {
         const resp = await fetch(url, {
             method: 'POST',
@@ -551,6 +596,7 @@ ipcMain.handle('ai:chat', async (event, messages) => {
         event.sender.send('ai:done', { ok: false, error: (err.message || '').slice(0, 200) })
         return { ok: false, error: err.message }
     } finally {
+        clearTimeout(hardTimer)   // 清理整体超时
         aiAbort = null
     }
 })
@@ -561,7 +607,7 @@ ipcMain.handle('ai:abort', async () => {
     return { ok: true }
 })
 
-// 递归搜索文件名，最多 200 条结果。
+// 递归搜索文件名，最多 200 条结果；遍历文件数上限 20000，防止超大目录全盘扫描卡主进程。
 // 跳过隐藏项和 node_modules（噪音大），无法读取的目录静默跳过。
 ipcMain.handle('fs:search', async (_event, rootPath, query) => {
     try {
@@ -569,7 +615,10 @@ ipcMain.handle('fs:search', async (_event, rootPath, query) => {
         if (!q) return { ok: true, results: [] }
         const results = []
         const MAX = 200
+        let visited = 0
+        const MAX_VISITED = 20000
         const walk = async (dir) => {
+            if (visited >= MAX_VISITED) return
             let entries
             try {
                 entries = await fs.readdir(dir, { withFileTypes: true })
@@ -577,9 +626,10 @@ ipcMain.handle('fs:search', async (_event, rootPath, query) => {
                 return // 无权限的目录直接跳过
             }
             for (const e of entries) {
-                if (results.length >= MAX) return
+                if (results.length >= MAX || visited >= MAX_VISITED) return
                 if (e.name.startsWith('.')) continue
                 if (e.name === 'node_modules') continue
+                visited++
                 const full = path.join(dir, e.name)
                 if (e.name.toLowerCase().includes(q)) {
                     results.push({
@@ -745,13 +795,17 @@ ipcMain.handle('fs:scanLinks', async (_event, rootPath) => {
 // 插件系统（#14）：加载用户脚本。
 // 来源：用户数据目录 plugins/（全局）+ 工作区 .emerald/plugins/（项目内）。
 // 返回每个 .js 文件的源码，渲染进程在 iframe 沙箱里执行（隔离）。
+// 保护边界：最多 50 个插件、单文件 ≤ 256KB（先 stat 跳过超大文件，防止整读大文件经 IPC 全量下发）。
 ipcMain.handle('fs:loadPlugins', async (_event, rootPath) => {
     try {
         const dirs = []
         dirs.push({ dir: path.join(app.getPath('userData'), 'plugins'), scope: 'user' })
         if (rootPath) dirs.push({ dir: path.join(rootPath, '.emerald', 'plugins'), scope: 'workspace' })
         const plugins = []
+        const MAX_PLUGINS = 50
+        const MAX_SIZE = 256 * 1024
         for (const { dir, scope } of dirs) {
+            if (plugins.length >= MAX_PLUGINS) break
             let entries
             try {
                 entries = await fs.readdir(dir, { withFileTypes: true })
@@ -759,9 +813,12 @@ ipcMain.handle('fs:loadPlugins', async (_event, rootPath) => {
                 continue // 目录不存在则跳过
             }
             for (const e of entries) {
+                if (plugins.length >= MAX_PLUGINS) break
                 if (!e.isFile() || !/\.js$/i.test(e.name)) continue
                 const full = path.join(dir, e.name)
                 try {
+                    const s = await fs.stat(full)
+                    if (s.size > MAX_SIZE) continue   // 超大文件跳过（可能是误放的资源）
                     const content = await fs.readFile(full, 'utf-8')
                     plugins.push({ name: e.name, path: full, content, scope })
                 } catch {
@@ -780,6 +837,7 @@ ipcMain.handle('fs:installPlugin', async (_event, fileName, content) => {
     try {
         const safe = String(fileName || '').replace(/[^a-zA-Z0-9._-]/g, '_')
         if (!/\.js$/i.test(safe)) return { ok: false, error: '文件名必须以 .js 结尾' }
+        if (String(content || '').length > 1024 * 1024) return { ok: false, error: '插件内容超过 1MB 限制' }
         const dir = path.join(app.getPath('userData'), 'plugins')
         await fs.mkdir(dir, { recursive: true })
         await fs.writeFile(path.join(dir, safe), String(content), 'utf-8')
@@ -792,6 +850,7 @@ ipcMain.handle('fs:installPlugin', async (_event, fileName, content) => {
 ipcMain.handle('fs:uninstallPlugin', async (_event, fileName) => {
     try {
         const safe = String(fileName || '').replace(/[^a-zA-Z0-9._-]/g, '_')
+        if (!/\.js$/i.test(safe)) return { ok: false, error: '文件名必须以 .js 结尾' }   // 与 installPlugin 一致
         const full = path.join(app.getPath('userData'), 'plugins', safe)
         await fs.rm(full, { force: true })
         return { ok: true }

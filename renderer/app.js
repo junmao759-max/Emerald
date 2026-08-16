@@ -387,8 +387,8 @@ function liveCursorToSourcePos(P, sel, norm) {
 function pluginInsertText(text) {
     const f = state.currentFile
     if (!f || !f.path) { showNotice('请先打开一个文件'); return }
-    // 正在块编辑（liveEditor 就地 textarea）时先提交，避免插入丢失
-    if (liveEditingBlk && document.body.contains(liveEditingBlk)) commitBlockEdit(liveEditingBlk)
+    // 正在行编辑（liveEditor 行编辑器）时先提交，避免插入丢失
+    if (liveEdit) commitLineEdit()
     const P = curPaneEls()
     const norm = f.content.replace(/\r\n/g, '\n')
     const isLive = P.liveEditor && !P.liveEditor.classList.contains('hidden')
@@ -608,6 +608,9 @@ const els = {
     helpOverlay: $('helpOverlay'),
     helpClose: $('helpClose'),
     launchHelpBtn: $('launchHelpBtn'),
+    linkPicker: $('linkPicker'),
+    lkInput: $('lkInput'),
+    lkResults: $('lkResults'),
     graphBtn: $('graphBtn'),
     graphPanel: $('graphPanel'),
     graphStats: $('graphStats'),
@@ -1366,6 +1369,9 @@ function updateFileTypeBadge(paneIndex) {
 
 // 按面板渲染所见即所得编辑器
 function renderLiveEditor(paneIndex) {
+    // 任何重渲染前先提交未完成的行编辑（切换面板 / 切换文件 / 切视图时避免内容丢失）。
+    // commitLineEdit 内部会置 liveEdit=null 再调本函数 → 不会递归。
+    if (liveEdit) commitLineEdit()
     const i = paneIndex == null ? state.activePane : paneIndex
     const P = paneEls(i)
     const pane = state.panes[i]
@@ -1374,18 +1380,39 @@ function renderLiveEditor(paneIndex) {
     if (!f || !isMarkdown(f.name)) return
     P.liveEditor.innerHTML = previewHtmlFor(f.path, f.content)
     highlightPreviewBlocks()
-    liveEditingBlk = null
+    liveEdit = null   // 重渲染后行编辑器失效
 }
 
 // 实时编辑器点击委托（面板 0 静态绑定 + 面板 1 动态绑定共用）：
 // 任务勾选 > wikilink > 普通链接 > 点击块进入编辑
+// —— mousedown：行编辑入口（一次点击直达）——
+// 用 mousedown 而非 click：点击另一行时，旧行 blur 会同步重渲染，导致
+// mouseup/click 的目标 DOM 已失效、click 不派发（于是要点两次）。
+// mousedown 先于 blur，手动提交后立即用坐标重新定位新行，一次完成。
+function handleLiveEditorMouseDown(e) {
+    const t = e.target
+    if (!t || !t.closest) return
+    if (t.closest('.line-inline')) return                              // 行编辑器内部（移动光标）
+    if (t.closest('input[type=checkbox], .wikilink, a[href]')) return  // 交互元素交回 click
+    if (liveEdit) commitLineEdit()                                     // 先提交当前行（同步重渲染）
+    const hit = document.elementFromPoint(e.clientX, e.clientY) || t   // 重渲染后用坐标重新定位
+    const blk = hit.closest('.blk[data-s]')
+    if (blk) {
+        e.preventDefault()   // 阻止默认 blur 干扰（已手动提交）
+        openLineEditor(e, blk)
+    }
+}
+els.liveEditor.addEventListener('mousedown', handleLiveEditorMouseDown)
+
 function handleLiveEditorClick(e) {
+    // 交互元素优先处理（先提交未完成的行编辑）；行编辑已由 mousedown 处理
     const cb = e.target.closest('input[type=checkbox][data-line]')
-    if (cb) { toggleTaskLine(cb); return }
+    if (cb) { if (liveEdit) commitLineEdit(); toggleTaskLine(cb); return }
     const wl = e.target.closest('.wikilink')
-    if (wl) { e.preventDefault(); openWikilink(wl.getAttribute('data-target')); return }
+    if (wl) { if (liveEdit) commitLineEdit(); e.preventDefault(); openWikilink(wl.getAttribute('data-target')); return }
     const link = e.target.closest('a[href]')
     if (link) {
+        if (liveEdit) commitLineEdit()
         e.preventDefault()
         const href = link.getAttribute('href')
         if (/^(https?:|mailto:)/i.test(href)) { window.electronAPI.openExternal(href); return }
@@ -1395,8 +1422,446 @@ function handleLiveEditorClick(e) {
         if (target) openLocalPath(target)
         return
     }
-    const blk = e.target.closest('.blk[data-s]')
-    if (blk) openBlockEditor(blk)
+}
+// ================================================================
+// Obsidian 风格"行渲染"编辑器：点击行 → 整行容器（li / 标题 / 段落）内容就地
+// 替换为原生 Markdown 行编辑器（无边框无弹窗），其余行保持渲染。
+// 行号由"行容器序号"映射（li[0]→块起始行，li[1]→下一行…），不依赖渲染文本换行数，
+// 多行列表 / 行内 strong/em 也不会错位；Enter / 失焦提交，Esc 取消，↑↓ 移动。
+// 复杂块（表格 / 代码块 / 多行段落）整块编辑。
+// ================================================================
+let liveEdit = null   // { mode:'line'|'block', paneIdx, blk, lineNo, s, e, ta, cancel }
+
+// —— 行编辑撤销栈（Ctrl+Z）：记录提交 / 移动前的行内容 ——
+let editUndoStack = []   // [{ paneIdx, lineNo, old, next }]（block 模式 old/next 为行区间数组）
+const EDIT_UNDO_MAX = 60
+
+function pushEditUndo(path, lineNo, oldVal, newVal) {
+    if (oldVal === newVal) return
+    editUndoStack.push({ path, paneIdx: null, lineNo, old: oldVal, next: newVal })
+    if (editUndoStack.length > EDIT_UNDO_MAX) editUndoStack.shift()
+}
+
+// Ctrl+Z：恢复上一次行编辑前的状态（提交 / 移动 / 回车换行前的行内容）
+// 优先按"编辑时记录的路径"定位标签，避免面板切换后撤回到错误文件
+function undoLineEdit() {
+    const item = editUndoStack.pop()
+    if (!item) return
+    const tab = (item.path && state.tabs.find((t) => t.path === item.path))
+        || (item.paneIdx != null && state.tabs.find((t) => t.id === state.panes[item.paneIdx].tabId))
+        || null
+    const f = tab && tab.path ? tab : null
+    if (!f) return
+    if (liveEdit) commitLineEdit()
+    const lines = f.content.split('\n')
+    if (item.lineNo < 0 || item.lineNo >= lines.length) return
+    lines[item.lineNo] = item.old
+    f.content = lines.join('\n')
+    // 定位文件所在面板（可能在非活动面板；不在任何面板则只改内容，激活时自然渲染）
+    const pi = state.panes.findIndex((p) => p.tabId === tab.id)
+    if (pi < 0) return
+    updateSaveStatus(pi)
+    renderTabs()
+    if (state.activePane === pi) renderOutline()
+    const P = paneEls(pi)
+    const st = P.liveEditor.scrollTop
+    renderLiveEditor(pi)
+    P.liveEditor.scrollTop = st
+    // 恢复后打开该行编辑，方便继续操作
+    if (state.activePane === pi) setTimeout(() => openLineAt(item.lineNo), 0)
+}
+
+// 向上找"行容器"元素（不越过 blk）：li / 标题 / 段落 / 引用
+function rowElementOf(node, blk) {
+    let el = node && node.nodeType === 3 ? node.parentNode : node
+    while (el && el !== blk) {
+        if (!el.tagName) { el = el.parentNode; continue }
+        const tag = el.tagName.toUpperCase()
+        if (tag === 'LI' || /^H[1-6]$/.test(tag) || tag === 'P' || tag === 'BLOCKQUOTE' || tag === 'HR') return el
+        el = el.parentNode
+    }
+    return null
+}
+
+// 块内行容器列表（行号映射基准）
+function rowElementsOf(blk) {
+    return [...blk.querySelectorAll('li, h1, h2, h3, h4, h5, h6, p, blockquote, hr')]
+}
+
+// 行容器 → 源行号（块起始行 + 容器序号）
+function rowElToLineNo(blk, rowEl) {
+    const idx = rowElementsOf(blk).indexOf(rowEl)
+    if (idx < 0) return -1
+    return parseInt(blk.dataset.s, 10) + idx
+}
+
+// 点击渲染内容 → 打开行（或整块）的原生 Markdown 编辑器
+function openLineEditor(e, blk) {
+    if (liveEdit) commitLineEdit()
+    const paneIdx = blk.closest('.pane') ? Number(blk.closest('.pane').dataset.pane) : state.activePane
+    const tab = state.tabs.find((t) => t.id === state.panes[paneIdx].tabId) || null
+    const f = tab && tab.path ? tab : null
+    if (!f) return
+    const s = parseInt(blk.dataset.s, 10)
+    const eEnd = parseInt(blk.dataset.e, 10)
+    if (isNaN(s) || isNaN(eEnd) || s < 0 || eEnd < s) return
+    // 整块编辑：表格 / 代码块 / 多行段落块（data-s<data-e 且非列表）
+    const hasTablePre = blk.querySelector('table, pre')
+    const hasList = blk.querySelector('ul, ol')
+    if (hasTablePre || (eEnd > s && !hasList)) {
+        openBlockInlineEditor(blk, s, eEnd)
+        return
+    }
+    // 行容器定位：用坐标重新命中（重渲染后旧 e.target 已 detached；合成/真实点击坐标始终有效）
+    const node = document.elementFromPoint(e.clientX, e.clientY) || e.target
+    const rowEl = rowElementOf(node, blk)
+    if (!rowEl) return
+    const lineNo = rowElToLineNo(blk, rowEl)
+    const lines = f.content.split('\n')
+    // 光标位置：点击坐标 → 渲染偏移 → 源偏移（逐字符贪心映射，跳过行首/行内标记字符）
+    let caret = -1
+    try {
+        const cp = document.caretPositionFromPoint(e.clientX, e.clientY)
+        if (cp && cp.offsetNode) {
+            const rowEl2 = rowElementOf(cp.offsetNode, blk)
+            if (rowEl2) {
+                const r = document.createRange()
+                r.setStart(rowEl2, 0)
+                r.setEnd(cp.offsetNode, cp.offset)
+                const renderOff = r.toString().length
+                const srcLine = lines[lineNo] || ''
+                caret = renderOffsetToSrc((rowEl2.textContent || ''), srcLine, renderOff)
+            }
+        }
+    } catch { caret = -1 }
+    openRowEditor(blk, rowEl, lineNo, caret)
+}
+
+// 渲染文本偏移 → 源行偏移：跳过源行中的标记字符（- / # / ** / * / ` 等）
+// 贪心匹配：渲染文本逐字符在源行中找对应（源中不匹配的字符视为标记直接跳过）
+function renderOffsetToSrc(renderText, srcLine, renderOff) {
+    if (!srcLine) return 0
+    let s = 0
+    const rl = String(renderText || '')
+    for (let i = 0; i < renderOff; i++) {
+        const ch = rl[i]
+        if (ch === undefined) break
+        // 在源行中从当前位置找匹配字符（跳过标记字符）
+        while (s < srcLine.length && srcLine[s] !== ch) s++
+        if (s < srcLine.length) s++
+    }
+    return Math.min(s, srcLine.length)
+}
+
+// 打开指定行编辑（点击 / 回车前进共用）；caret 为行内光标偏移（-1 = 行尾）
+function openRowEditor(blk, rowEl, lineNo, caret) {
+    const paneIdx = blk.closest('.pane') ? Number(blk.closest('.pane').dataset.pane) : state.activePane
+    const tab = state.tabs.find((t) => t.id === state.panes[paneIdx].tabId) || null
+    const f = tab && tab.path ? tab : null
+    if (!f || !rowEl) return
+    const lines = f.content.split('\n')
+    if (lineNo < 0 || lineNo >= lines.length) return
+    // 分割线（hr）是自闭合元素，无子节点可替换 → 直接替换元素本身
+    if (rowEl.tagName === 'HR') {
+        const ta = document.createElement('textarea')
+        ta.className = 'line-inline'
+        ta.value = lines[lineNo]
+        ta.spellcheck = false
+        ta.wrap = 'off'
+        rowEl.parentNode.replaceChild(ta, rowEl)
+        liveEdit = { mode: 'line', paneIdx, path: f.path, blk, lineNo, s: parseInt(blk.dataset.s, 10), e: parseInt(blk.dataset.e, 10), ta, cancel: false }
+        bindLineEditorEvents(ta)
+        const pos = (caret != null && caret >= 0) ? Math.min(caret, ta.value.length) : ta.value.length
+        ta.setSelectionRange(pos, pos)
+        updateLineStatus()
+        return
+    }
+    // 整行容器内容就地替换为透明行编辑器（零视觉：无边框 / 无阴影 / 字体与预览一致）
+    const range = document.createRange()
+    range.selectNodeContents(rowEl)
+    const ta = document.createElement('textarea')
+    ta.className = 'line-inline'
+    ta.value = lines[lineNo]
+    ta.spellcheck = false
+    ta.wrap = 'off'
+    range.deleteContents()
+    range.insertNode(ta)
+    liveEdit = { mode: 'line', paneIdx, path: f.path, blk, lineNo, s: parseInt(blk.dataset.s, 10), e: parseInt(blk.dataset.e, 10), ta, cancel: false }
+    bindLineEditorEvents(ta)
+    // 光标停在点击位置（或行尾）
+    const pos = (caret != null && caret >= 0) ? Math.min(caret, ta.value.length) : ta.value.length
+    ta.setSelectionRange(pos, pos)
+    updateLineStatus()
+}
+
+// 按行号打开编辑（回车前进 / ↑↓ 移动等程序化场景；paneIdx 缺省 = 活动面板）
+// 普通行 → 行编辑器；表格 / 代码 / 多行段落 → 整块编辑器；
+// 无块覆盖的行（空分隔行 / 文档末尾）→ 在正确位置插入空行编辑器
+function openLineAt(lineNo, paneIdx, caret) {
+    const idx = (paneIdx != null && state.panes[paneIdx]) ? paneIdx : state.activePane
+    const P = paneEls(idx)
+    const blks = [...P.liveEditor.querySelectorAll('.blk[data-s]')]
+    const blk = blks.find((b) => parseInt(b.dataset.s, 10) <= lineNo && parseInt(b.dataset.e, 10) >= lineNo)
+    if (blk) {
+        const s = parseInt(blk.dataset.s, 10)
+        const e = parseInt(blk.dataset.e, 10)
+        const hasTablePre = blk.querySelector('table, pre')
+        const hasList = blk.querySelector('ul, ol')
+        if (hasTablePre || (e > s && !hasList)) { openBlockInlineEditor(blk, s, e); return }
+        const rowEl = rowElementsOf(blk)[lineNo - s]
+        if (rowEl) { openRowEditor(blk, rowEl, lineNo, caret); return }
+        openBlockInlineEditor(blk, s, e)   // 防御：块内无行容器（复杂多行条目）
+        return
+    }
+    // 无块覆盖（空分隔行 / 文档末尾 / 空文档）：在相邻块之间插入行编辑器
+    const tab = state.tabs.find((t) => t.id === state.panes[idx].tabId) || null
+    const f = tab && tab.path ? tab : null
+    if (!f) return
+    const ta = document.createElement('textarea')
+    ta.className = 'line-inline'
+    ta.value = ''
+    ta.spellcheck = false
+    ta.wrap = 'off'
+    const nextBlk = blks.find((b) => parseInt(b.dataset.s, 10) > lineNo)
+    const bodyEl = P.liveEditor.querySelector('.md-body')
+    if (nextBlk) nextBlk.parentNode.insertBefore(ta, nextBlk)
+    else if (bodyEl) bodyEl.appendChild(ta)
+    else P.liveEditor.appendChild(ta)
+    liveEdit = { mode: 'line', paneIdx: idx, path: f.path, blk: null, lineNo, s: lineNo, e: lineNo, ta, cancel: false }
+    bindLineEditorEvents(ta)
+    if (caret != null && caret > 0) ta.setSelectionRange(caret, caret)
+    if (!nextBlk) P.liveEditor.scrollTop = P.liveEditor.scrollHeight
+}
+
+// 复杂块整块就地编辑：块内容替换为多行 textarea（值 = 源行区间 markdown）
+function openBlockInlineEditor(blk, s, e) {
+    const paneIdx = blk.closest('.pane') ? Number(blk.closest('.pane').dataset.pane) : state.activePane
+    const tab = state.tabs.find((t) => t.id === state.panes[paneIdx].tabId) || null
+    const f = tab && tab.path ? tab : null
+    if (!f) return
+    const lines = f.content.split('\n')
+    const ta = document.createElement('textarea')
+    ta.className = 'line-inline block-inline'
+    ta.value = lines.slice(s, e + 1).join('\n')
+    ta.spellcheck = false
+    ta.wrap = 'off'
+    blk.innerHTML = ''
+    blk.appendChild(ta)
+    liveEdit = { mode: 'block', paneIdx, path: f.path, blk, lineNo: s, s, e, ta, cancel: false }
+    bindLineEditorEvents(ta)
+    updateLineStatus()
+}
+
+// 行编辑器事件绑定：行模式 Enter 提交并前进下一行；块模式（表格/代码）Enter 换行、Ctrl+Enter 提交
+function bindLineEditorEvents(ta) {
+    ta.addEventListener('keydown', (ev) => {
+        ev.stopPropagation()
+        if (ev.key === 'Escape') { ev.preventDefault(); cancelLineEdit(); return }
+        if (ev.key === 'Enter') {
+            const isBlock = liveEdit && liveEdit.mode === 'block'
+            if (isBlock) {
+                if (ev.ctrlKey || ev.metaKey) { ev.preventDefault(); commitLineEdit(); return }
+                return   // 块模式：Enter 换行（不拦截，textarea 默认行为）
+            }
+            if (!ev.shiftKey) { ev.preventDefault(); lineEditEnter(); return }
+            return
+        }
+        if (ev.key === 'ArrowUp') { ev.preventDefault(); moveLineEdit(-1); return }
+        if (ev.key === 'ArrowDown') { ev.preventDefault(); moveLineEdit(1); return }
+    })
+    ta.addEventListener('blur', () => commitLineEdit())
+    ta.focus()
+    ta.setSelectionRange(ta.value.length, ta.value.length)
+}
+
+// 行编辑器内容 → 状态栏行号 + lastCaretPos（供插件插入定位）
+function updateLineStatus() {
+    const le = liveEdit
+    if (!le) return
+    if (le.mode === 'block') {
+        // 块模式（表格/代码/多行段）：按光标前换行数算实际行号
+        const upto = le.ta.value.slice(0, le.ta.selectionStart)
+        const nl = upto.lastIndexOf('\n')
+        state.cursorLine = le.s + 1 + (nl === -1 ? 0 : upto.slice(0, nl).split('\n').length)
+        state.cursorCol = le.ta.selectionStart - nl
+        updateStatusBar()
+        return
+    }
+    state.cursorLine = le.lineNo + 1
+    state.cursorCol = le.ta.selectionStart + 1
+    updateStatusBar()
+    const f = state.currentFile
+    if (f && typeof f.content === 'string') {
+        const lines = f.content.split('\n')
+        let start = 0
+        for (let i = 0; i < le.lineNo; i++) start += (lines[i] || '').length + 1
+        lastCaretPos = start + le.ta.selectionStart
+    }
+}
+
+// 行模式：↑↓ 光标移动到相邻行（编辑器跟随光标位置重新打开；可跨块移动，光标列尽量保持）
+function moveLineEdit(delta) {
+    const le = liveEdit
+    if (!le || le.mode !== 'line') return
+    const tab = state.tabs.find((t) => t.path === le.path)
+        || state.tabs.find((t) => t.id === state.panes[le.paneIdx].tabId) || null
+    const f = tab && tab.path ? tab : null
+    if (!f) return
+    const lines = f.content.split('\n')
+    const next = le.lineNo + delta
+    if (next < 0 || next >= lines.length) return   // 边界：不越出文档
+    // 保存当前行修改（记录撤销），然后在新行位置重新打开编辑器 → 光标跟随移动
+    const col = le.ta.selectionStart
+    pushEditUndo(f.path, le.lineNo, lines[le.lineNo], le.ta.value)
+    lines[le.lineNo] = le.ta.value
+    f.content = lines.join('\n')
+    commitAndReopen(next, col)
+}
+
+// 提交：把编辑器内容写回源文件对应行（或行区间）→ 重渲染恢复渲染态
+function commitLineEdit() {
+    const le = liveEdit
+    if (!le) return
+    liveEdit = null
+    // 优先按"打开编辑器时记录的路径"定位标签：面板中途切换文件时，编辑内容仍写回原文件
+    const tab = (le.path && state.tabs.find((t) => t.path === le.path))
+        || state.tabs.find((t) => t.id === state.panes[le.paneIdx].tabId) || null
+    const f = tab && tab.path ? tab : null
+    const newVal = le.ta.value
+    le.ta.remove()
+    if (le.cancel || !f) {
+        if (f) renderLiveEditor(le.paneIdx)   // 取消：恢复渲染（就地替换删了渲染文本，必须重渲染）
+        return
+    }
+    const lines = f.content.split('\n')
+    if (le.mode === 'line') {
+        if (le.lineNo >= 0 && le.lineNo < lines.length) {
+            pushEditUndo(f.path, le.lineNo, lines[le.lineNo], newVal)
+            lines[le.lineNo] = newVal
+        }
+    } else {
+        const replacement = newVal === '' ? [''] : newVal.split('\n')
+        if (le.s >= 0 && le.s <= le.e && le.e < lines.length) {
+            pushEditUndo(f.path, le.s, lines.slice(le.s, le.e + 1).join('\n'), newVal)
+            lines.splice(le.s, le.e - le.s + 1, ...replacement)
+        }
+    }
+    f.content = lines.join('\n')
+    updateSaveStatus(le.paneIdx)
+    renderTabs()
+    if (le.paneIdx === state.activePane) renderOutline()
+    // 无条件重渲染：恢复该行渲染态
+    const P = paneEls(le.paneIdx)
+    const scrollTop = P.liveEditor.scrollTop
+    renderLiveEditor(le.paneIdx)
+    P.liveEditor.scrollTop = scrollTop
+}
+
+// 提交并重渲染后，在指定行重新打开编辑（回车前进 / ↑↓ 移动等连续编辑场景）
+function commitAndReopen(lineNo, caret) {
+    const le = liveEdit
+    if (!le) return
+    liveEdit = null
+    updateSaveStatus(le.paneIdx)
+    renderTabs()
+    if (le.paneIdx === state.activePane) renderOutline()
+    const P = paneEls(le.paneIdx)
+    const scrollTop = P.liveEditor.scrollTop
+    renderLiveEditor(le.paneIdx)
+    P.liveEditor.scrollTop = scrollTop
+    if (lineNo >= 0) {
+        const paneIdx = le.paneIdx
+        setTimeout(() => {
+            openLineAt(lineNo, paneIdx, caret)
+            if (!liveEdit) {
+                // 新行不在任何块（防御）：在 liveEditor 正确位置追加行编辑器，光标继续
+                appendTailLineEditor(lineNo, paneIdx)
+            }
+        }, 0)
+    }
+}
+
+// 在指定行位置插入空行编辑器（无块覆盖行：空分隔行 / 文档末尾）
+function appendTailLineEditor(lineNo, paneIdx) {
+    const idx = (paneIdx != null && state.panes[paneIdx]) ? paneIdx : state.activePane
+    const P = paneEls(idx)
+    const ta = document.createElement('textarea')
+    ta.className = 'line-inline'
+    ta.value = ''
+    ta.spellcheck = false
+    ta.wrap = 'off'
+    const blks = [...P.liveEditor.querySelectorAll('.blk[data-s]')]
+    const nextBlk = blks.find((b) => parseInt(b.dataset.s, 10) > lineNo)
+    const bodyEl = P.liveEditor.querySelector('.md-body')
+    if (nextBlk) nextBlk.parentNode.insertBefore(ta, nextBlk)
+    else if (bodyEl) bodyEl.appendChild(ta)
+    else P.liveEditor.appendChild(ta)
+    const tab = state.tabs.find((t) => t.id === state.panes[idx].tabId) || null
+    const f = tab && tab.path ? tab : null
+    if (!f) { ta.remove(); return }
+    liveEdit = { mode: 'line', paneIdx: idx, path: f.path, blk: null, lineNo, s: lineNo, e: lineNo, ta, cancel: false }
+    bindLineEditorEvents(ta)
+    if (!nextBlk) P.liveEditor.scrollTop = P.liveEditor.scrollHeight
+}
+
+// 行模式回车：提交当前行并在下方新建行（Obsidian 行为）
+// - 列表行：下方插入同类型标识行（有序编号递增 1. → 2.）；若下一行已是"空标识行"→ 去掉标识下移（结束列表）
+// - 当前行本身是"空标识行"（刚回车产生）→ 回车即去除标识，光标停在该行（两次回车结束列表）
+// - 普通行 / 空行：下方插入空行，光标下移（可无限连续回车产生空行）
+function lineEditEnter() {
+    const le = liveEdit
+    if (!le || le.mode !== 'line') { commitLineEdit(); return }
+    const tab = state.tabs.find((t) => t.path === le.path)
+        || state.tabs.find((t) => t.id === state.panes[le.paneIdx].tabId) || null
+    const f = tab && tab.path ? tab : null
+    if (!f) { commitLineEdit(); return }
+    const lines = f.content.split('\n')
+    const curLine = le.ta.value
+    const marker = /^(\s*)([-*+]|\d+\.)\s+/.exec(curLine)
+    const curIsBareMarker = marker && curLine.slice(marker[0].length) === ''
+    const nextNo = le.lineNo + 1
+    // 当前行是"只有标识"（上一次回车产生）→ 直接在编辑器内去掉标识，光标保持在该行（Obsidian：两次回车结束列表）
+    if (curIsBareMarker) {
+        le.ta.value = ''
+        le.ta.focus()
+        updateLineStatus()
+        return
+    }
+    // 提交当前行（记录撤销）
+    pushEditUndo(f.path, le.lineNo, lines[le.lineNo], curLine)
+    lines[le.lineNo] = curLine
+    if (marker) {
+        // 下一行是"空标识行"（上一次回车产生，且光标又回到本行）→ 去掉标识并下移（结束列表）
+        const nextLine = lines[nextNo] || ''
+        const nextMarker = /^(\s*)([-*+]|\d+\.)\s+/.exec(nextLine)
+        const nextIsBareMarker = nextMarker && nextLine.slice(nextMarker[0].length) === ''
+        if (nextIsBareMarker) {
+            lines[nextNo] = ''
+            f.content = lines.join('\n')
+            commitAndReopen(nextNo)
+            return
+        }
+        // 列表续接：插入新的标识行（下一行及后续整体下移，不覆盖原内容；有序编号递增）
+        let prefix = marker[1] + marker[2] + ' '
+        const num = /^(\d+)\.$/.exec(marker[2])
+        if (num) prefix = marker[1] + (parseInt(num[1], 10) + 1) + '. '
+        lines.splice(nextNo, 0, prefix)
+        f.content = lines.join('\n')
+        commitAndReopen(nextNo)
+        return
+    }
+    // 普通行 / 空行：插入空行，光标下移（可无限连续回车）
+    lines.splice(nextNo, 0, '')
+    f.content = lines.join('\n')
+    commitAndReopen(nextNo)
+}
+
+// 取消（Esc）：不提交，恢复渲染
+function cancelLineEdit() {
+    const le = liveEdit
+    if (!le) return
+    le.cancel = true
+    commitLineEdit()   // 让 commitLineEdit 走取消分支（移除编辑器并重渲染恢复）
 }
 function showPaneEditorInput(i) {
     const P = paneEls(i)
@@ -1437,103 +1902,8 @@ function showPanePreview(i) {
  * Esc 取消。块行号区间由 md-parser 的 data-s / data-e 提供。
  * ================================================================ */
 
-let liveEditingBlk = null   // 当前正在编辑的块（.blk 元素）
-
 // 面板 0 的实时编辑器事件委托（面板 1 在 createPaneDom 里绑定同一个处理函数）
 els.liveEditor.addEventListener('click', handleLiveEditorClick)
-
-// 点击块 → 就地暴露原始 Markdown 编辑（按块所在面板解析标签）
-function openBlockEditor(blk) {
-    const paneIdx = blk.closest('.pane') ? Number(blk.closest('.pane').dataset.pane) : state.activePane
-    const tab = state.tabs.find((t) => t.id === state.panes[paneIdx].tabId) || null
-    const f = tab && tab.path ? tab : null
-    if (!f || blk.classList.contains('editing')) return
-    const s = parseInt(blk.dataset.s, 10)
-    const e = parseInt(blk.dataset.e, 10)
-    if (isNaN(s) || isNaN(e) || s < 0 || e < s) return
-    const lines = f.content.split('\n')
-    if (e >= lines.length) return
-
-    blk.classList.add('editing')
-    blk.innerHTML = ''
-    const ta = document.createElement('textarea')
-    ta.className = 'blk-editor'
-    ta.value = lines.slice(s, e + 1).join('\n')
-    ta.spellcheck = false
-    ta.addEventListener('keydown', (ev) => {
-        ev.stopPropagation()
-        if (ev.key === 'Escape') {
-            ev.preventDefault()
-            blk.dataset.cancel = '1'   // 取消标记：重渲染移除焦点触发的 blur 不得提交
-            renderLiveEditor(paneIdx)
-            return
-        }
-        if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); commitBlockEdit(blk) }
-    })
-    ta.addEventListener('keyup', () => trackBlockCursor(blk, ta))
-    ta.addEventListener('click', () => trackBlockCursor(blk, ta))
-    ta.addEventListener('blur', () => commitBlockEdit(blk))
-    blk.appendChild(ta)
-    liveEditingBlk = blk
-    ta.focus()
-    ta.setSelectionRange(ta.value.length, ta.value.length)
-    trackBlockCursor(blk, ta)
-}
-
-// 块内光标 → 状态栏行号（全局行 = 块起始行 + 块内偏移）；同时记录源偏移供插件插入
-function trackBlockCursor(blk, ta) {
-    const s = parseInt(blk.dataset.s, 10)
-    const upto = ta.value.slice(0, ta.selectionStart)
-    const nl = upto.lastIndexOf('\n')
-    state.cursorLine = s + 1 + (nl === -1 ? 0 : upto.slice(0, nl).split('\n').length)
-    state.cursorCol = ta.selectionStart - nl
-    updateStatusBar()
-    // 源偏移：块起始字符 + 块内偏移（即使退出块编辑，插件插入也能定位到这里）
-    if (!isNaN(s)) {
-        const paneIdx = blk.closest('.pane') ? Number(blk.closest('.pane').dataset.pane) : state.activePane
-        const tab = state.tabs.find((t) => t.id === state.panes[paneIdx].tabId)
-        if (tab && typeof tab.content === 'string') {
-            const lines = tab.content.split('\n')
-            let start = 0
-            for (let i = 0; i < s; i++) start += (lines[i] || '').length + 1
-            lastCaretPos = start + ta.selectionStart
-        }
-    }
-}
-
-// 提交块编辑：把块的行区间替换成新内容 → 重渲染并滚回原位
-function commitBlockEdit(blk) {
-    if (!blk.classList.contains('editing')) return
-    // 取消路径（Esc）：直接放弃，不提交
-    if (blk.dataset.cancel === '1') { delete blk.dataset.cancel; return }
-    // 块已被重渲染移除（重复 blur）时不提交
-    if (!document.body.contains(blk)) return
-    const paneIdx = blk.closest('.pane') ? Number(blk.closest('.pane').dataset.pane) : state.activePane
-    const tab = state.tabs.find((t) => t.id === state.panes[paneIdx].tabId) || null
-    const f = tab && tab.path ? tab : null
-    const ta = blk.querySelector('textarea.blk-editor')
-    if (!f || !ta) return
-    const s = parseInt(blk.dataset.s, 10)
-    const e = parseInt(blk.dataset.e, 10)
-    const lines = f.content.split('\n')
-    if (e < s || e >= lines.length) { renderLiveEditor(paneIdx); return }
-    const replacement = ta.value === '' ? [''] : ta.value.split('\n')
-    f.content = lines.slice(0, s).concat(replacement, lines.slice(e + 1)).join('\n')
-    updateSaveStatus(paneIdx)
-    renderTabs()
-    if (paneIdx === state.activePane) renderOutline()   // G：大纲随块编辑刷新
-    // 重渲染并滚回该块位置，闪烁提示
-    const P = paneEls(paneIdx)
-    const scrollTop = P.liveEditor.scrollTop
-    renderLiveEditor(paneIdx)
-    P.liveEditor.scrollTop = scrollTop
-    const newBlk = P.liveEditor.querySelector('.blk[data-s="' + s + '"]')
-    if (newBlk) {
-        newBlk.scrollIntoView({ block: 'nearest' })
-        newBlk.classList.add('flash')
-        setTimeout(() => newBlk.classList.remove('flash'), 900)
-    }
-}
 
 // 纯函数：任意文件（路径 + 内容）→ 预览 HTML（编辑器预览 + 悬浮预览共用）
 // 传路径而非名称：Markdown 内嵌图片的相对路径要按"当前文件所在目录"解析
@@ -2301,10 +2671,121 @@ async function insertWikilink() {
     applyEditorEdit(ctxSelStart, ctxSelEnd, '[[' + target + ']]')
 }
 
+// ================================================================
+// 插入内部笔记链接选择器（Obsidian 风格）：输入笔记名 → 搜索工作区 md → 选择插入 [[名称]]
+// ================================================================
+let lkResults = []      // [{ name, path }]（去 .md 后缀显示）
+let lkIndex = 0
+
+function openLinkPicker() {
+    if (!state.rootPath) { showNotice('请先打开一个工作区'); return }
+    els.linkPicker.classList.remove('hidden')
+    els.lkInput.value = ''
+    els.lkResults.innerHTML = ''
+    lkResults = []
+    lkIndex = 0
+    els.lkInput.focus()
+    renderLkResults('')
+}
+
+function closeLinkPicker() {
+    els.linkPicker.classList.add('hidden')
+}
+
+// 搜索 + 渲染：调用主进程 fs:search 匹配文件名，只留 Markdown
+let lkTimer
+els.lkInput.addEventListener('input', () => {
+    clearTimeout(lkTimer)
+    lkTimer = setTimeout(() => renderLkResults(els.lkInput.value.trim()), 180)
+})
+
+async function renderLkResults(q) {
+    const list = els.lkResults
+    list.innerHTML = ''
+    lkResults = []
+    lkIndex = 0
+    let items = []
+    if (q) {
+        const res = await window.electronAPI.search(state.rootPath, q)
+        if (res.ok) {
+            items = res.results
+                .filter((r) => !r.isDir && /\.md$/i.test(r.name))
+                .map((r) => ({ name: r.name.replace(/\.md$/i, ''), path: r.path }))
+        }
+    } else {
+        // 空输入：列出根目录全部 md（快速链接常用笔记）
+        const res = await window.electronAPI.readDir(state.rootPath)
+        if (res.ok) {
+            items = res.items
+                .filter((i) => !i.isDir && /\.md$/i.test(i.name))
+                .map((i) => ({ name: i.name.replace(/\.md$/i, ''), path: joinPath(state.rootPath, i.name) }))
+        }
+    }
+    // 去重 + 截断
+    const seen = new Set()
+    lkResults = items.filter((i) => (seen.has(i.name) ? false : (seen.add(i.name), true))).slice(0, 50)
+    if (!lkResults.length) {
+        list.innerHTML = '<div class="qs-item" style="cursor:default;color:var(--icon-muted)">没有找到 Markdown 笔记</div>'
+        return
+    }
+    lkResults.forEach((it, i) => {
+        const item = document.createElement('div')
+        item.className = 'qs-item' + (i === lkIndex ? ' active' : '')
+        const icon = document.createElement('span')
+        icon.className = 'qs-icon'
+        icon.textContent = '📄'
+        const name = document.createElement('span')
+        name.className = 'qs-name'
+        name.textContent = it.name
+        const pathEl = document.createElement('span')
+        pathEl.className = 'qs-path'
+        pathEl.textContent = it.path
+        item.append(icon, name, pathEl)
+        item.addEventListener('click', () => insertLkPick(i))
+        item.addEventListener('mousemove', () => { lkIndex = i; updateLkHighlight() })
+        list.appendChild(item)
+    })
+}
+
+function updateLkHighlight() {
+    [...els.lkResults.children].forEach((el, i) => el.classList.toggle('active', i === lkIndex))
+}
+
+// 插入选中的笔记链接 [[名称]]（文本框模式用 ctxSel；实时模式用记录的位置 lkInsertPos）
+function insertLkPick(i) {
+    const it = lkResults[i]
+    if (!it) return
+    closeLinkPicker()
+    const link = '[[' + it.name + ']]'
+    if (lkInsertPos >= 0) {
+        srcApply((f) => {
+            const norm = f.content.replace(/\r\n/g, '\n')
+            f.content = norm.slice(0, lkInsertPos) + link + norm.slice(lkInsertPos)
+        })
+        lkInsertPos = -1
+    } else {
+        applyEditorEdit(ctxSelStart, ctxSelEnd, link)
+        renderLiveEditor(state.activePane)   // 实时模式重渲染显示新链接
+    }
+}
+
+els.lkInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); closeLinkPicker(); return }
+    if (e.key === 'ArrowDown') { e.preventDefault(); lkIndex = Math.min(lkIndex + 1, lkResults.length - 1); updateLkHighlight(); return }
+    if (e.key === 'ArrowUp') { e.preventDefault(); lkIndex = Math.max(lkIndex - 1, 0); updateLkHighlight(); return }
+    if (e.key === 'Enter') { e.preventDefault(); insertLkPick(lkIndex); return }
+})
+els.linkPicker.addEventListener('click', (e) => { if (e.target === els.linkPicker) closeLinkPicker() })
+
 // 编辑器右键菜单：插入子菜单 + 链接 + 常用编辑操作
 function showEditorContextMenu(x, y) {
+    // 标题：H1-H6 子菜单（参考 Obsidian）
+    const headings = [1, 2, 3, 4, 5, 6].map((n) => ({
+        label: '标题 H' + n,
+        action: () => linePrefix('#'.repeat(n) + ' '),
+    }))
     const insert = [
-        { label: '标题 H3', action: () => linePrefix('### ') },
+        { label: '标题', submenu: headings },
         { label: '加粗', action: () => surroundSelection('**', '**', '加粗文本') },
         { label: '斜体', action: () => surroundSelection('*', '*', '斜体文本') },
         { label: '删除线', action: () => surroundSelection('~~', '~~', '删除线') },
@@ -2317,7 +2798,6 @@ function showEditorContextMenu(x, y) {
         { label: '分割线', action: () => insertAtCursor('\n---\n') },
         { label: '表格', action: () => insertAtCursor(TABLE_SNIPPET) },
         { label: '图片', action: () => insertImage() },
-        { label: '双向链接', action: () => insertWikilink() },
     ]
     const items = []
     // 有选区时置顶"用选中文字问 AI"
@@ -2330,6 +2810,7 @@ function showEditorContextMenu(x, y) {
         items.push({ label: '🧩 插件命令', submenu: pluginCmds.map((c) => ({ label: c.label, action: () => PluginManager.runCommand(c) })) })
     }
     items.push(
+        { label: '🔗 插入内部笔记链接…', action: () => { hideContextMenu(); openLinkPicker() } },
         { label: '📥 插入', submenu: insert },
         { label: '🔗 插入链接', action: () => insertLink() },
         { label: '✂️ 剪切', action: () => { const el = curEditor(); el.focus(); el.setSelectionRange(ctxSelStart, ctxSelEnd); document.execCommand('cut') } },
@@ -2347,11 +2828,142 @@ function askAiSelection() {
 }
 
 // 所见即所得模式右键：有渲染选区时提供"用选中文字问 AI"，另附插件命令子菜单
+// —— liveEditor 右键：点击位置 → 源偏移 / 行号（供插入操作定位）——
+let lkInsertPos = -1   // 链接选择器在实时模式的插入位置（源偏移）
+
+// 渲染节点 → 源字符偏移（近似：行号 + 行内渲染偏移）
+// 渲染节点 → 源字符偏移（行容器序号定位：列表 / 标题逐项准确）
+function nodeToSrcOffset(blk, node, offset) {
+    const f = state.currentFile
+    if (!f || !blk) return -1
+    const rowEl = rowElementOf(node, blk)
+    if (!rowEl) return -1
+    const lineNo = rowElToLineNo(blk, rowEl)
+    const lines = f.content.replace(/\r\n/g, '\n').split('\n')
+    if (lineNo < 0 || lineNo >= lines.length) return -1
+    let start = 0
+    for (let i = 0; i < lineNo; i++) start += (lines[i] || '').length + 1
+    // 行内偏移（渲染 → 源）：渲染行可能不含源行的行首标记（- / # / > 等），按子串位置补偿
+    let col = 0
+    try {
+        const r = document.createRange()
+        r.setStart(rowEl, 0)
+        r.setEnd(node, offset)
+        col = r.toString().length
+    } catch { col = 0 }
+    const srcLine = lines[lineNo]
+    const renderLine = (rowEl.textContent || '').trim()
+    let offsetInSrc = col
+    if (renderLine && srcLine.includes(renderLine)) {
+        offsetInSrc = col + srcLine.indexOf(renderLine)   // 标记补偿（列表/标题/引用）
+    }
+    return start + Math.min(offsetInSrc, srcLine.length)
+}
+
+// 就地修改源文件并重渲染（实时模式右键插入用）
+function srcApply(fn, lineNo) {
+    // 菜单操作前安全清理行编辑器（值已由 flushLineEditValue 写回源，直接移除 ta 即可；
+    // 避免 renderLiveEditor 重渲染时与 blur 竞争报错"node no longer a child"）
+    if (liveEdit) {
+        const le = liveEdit
+        liveEdit = null
+        if (le.ta && le.ta.parentNode) le.ta.remove()
+    }
+    const f = state.currentFile
+    if (!f) return
+    fn(f)
+    for (let i = 0; i < state.panes.length; i++) {
+        const pEls = paneEls(i)
+        const pane = state.panes[i]
+        const tab = state.tabs.find((t) => t.id === pane.tabId)
+        if (tab && pEls.editor) pEls.editor.value = f.content
+    }
+    updateSaveStatus(state.activePane)
+    renderTabs()
+    if (state.activePane === state.panes.findIndex((p) => p.tabId === f.id)) renderOutline()
+    const P = curPaneEls()
+    const scrollTop = P.liveEditor.scrollTop
+    renderLiveEditor(state.activePane)
+    P.liveEditor.scrollTop = scrollTop
+    if (lineNo != null) revealLine(lineNo + 1)
+}
+
+// 实时模式右键菜单（与文本框对齐：链接 / 标题 / 格式 / 列表，作用于点击位置或选区）
+// 行号 → 源字符偏移（该行行首）
+function lineSrcOffset(lineNo) {
+    const f = state.currentFile
+    if (!f) return -1
+    const lines = f.content.replace(/\r\n/g, '\n').split('\n')
+    if (lineNo < 0 || lineNo >= lines.length) return -1
+    let s = 0
+    for (let i = 0; i < lineNo; i++) s += (lines[i] || '').length + 1
+    return s
+}
+
+// 把行编辑器当前值写回源文件（不重渲染、不退出编辑）：供右键菜单操作基于最新内容
+function flushLineEditValue() {
+    const le = liveEdit
+    if (!le || le.mode !== 'line') return
+    const tab = state.tabs.find((t) => t.id === state.panes[le.paneIdx].tabId)
+    const f = tab && tab.path ? tab : null
+    if (!f) return
+    const lines = f.content.split('\n')
+    if (le.lineNo >= 0 && le.lineNo < lines.length && lines[le.lineNo] !== le.ta.value) {
+        lines[le.lineNo] = le.ta.value
+        f.content = lines.join('\n')
+    }
+}
+
 function handleLiveEditorCtxMenu(e) {
     e.preventDefault()
     e.stopPropagation()
-    const items = []
+    const target = e.target || e.currentTarget || null
+    if (!target) return
+    // —— 编辑行优先：正在编辑某行时，右键操作作用在该行（不退出编辑）——
+    let lineNo = -1
+    let pos = -1
+    if (liveEdit) {
+        lineNo = liveEdit.lineNo
+        if (liveEdit.mode === 'block') {
+            commitLineEdit()   // 块模式（表格/代码/多行段）：提交收起再操作（块内行号难精确）
+            pos = lineSrcOffset(lineNo)
+        } else {
+            flushLineEditValue()   // 行模式：当前值写回源（不重渲染），保持编辑且操作基于最新内容
+            pos = lineSrcOffset(lineNo) + (liveEdit.ta.selectionStart || 0)   // 光标位置，而非行首
+        }
+    } else {
+        const blk = target.closest('.blk[data-s]')
+        pos = blk ? nodeToSrcOffset(blk, target, 0) : -1
+        if (blk) {
+            const rowEl = rowElementOf(target, blk)
+            lineNo = rowEl ? rowElToLineNo(blk, rowEl) : parseInt(blk.dataset.s, 10)
+        }
+    }
+    if (pos >= 0) lkInsertPos = pos
+    // liveEditor 选区（供包裹类操作）
     const sel = window.getSelection()
+    let selRange = null
+    if (sel && !sel.isCollapsed) {
+        const blk = target.closest('.blk[data-s]')
+        if (blk && e.currentTarget.contains(sel.anchorNode)) {
+            const a = nodeToSrcOffset(blk, sel.anchorNode, sel.anchorOffset)
+            const b = nodeToSrcOffset(blk, sel.focusNode, sel.focusOffset)
+            if (a >= 0 && b >= 0) selRange = { start: Math.min(a, b), end: Math.max(a, b) }
+        }
+    }
+    const headings = [1, 2, 3, 4, 5, 6].map((n) => ({
+        label: '标题 H' + n,
+        action: () => lineNo >= 0 && srcApply((f) => {
+            const lines = f.content.split('\n')
+            lines[lineNo] = '#'.repeat(n) + ' ' + lines[lineNo].replace(/^#{1,6}\s+/, '')
+            f.content = lines.join('\n')
+        }, lineNo),
+    }))
+    const prefix = (pfx) => () => lineNo >= 0 && srcApply((f) => {
+        const lines = f.content.split('\n'); lines[lineNo] = pfx + lines[lineNo]; f.content = lines.join('\n')
+    }, lineNo)
+    const items = []
+    // AI（有选区）
     if (sel && sel.toString().trim() && e.currentTarget.contains(sel.anchorNode)) {
         items.push({ label: '🤖 用选中文字问 AI（' + sel.toString().length + ' 字符）', action: () => {
             aiSel = null
@@ -2359,11 +2971,97 @@ function handleLiveEditorCtxMenu(e) {
             openAiPanel(true)
         } })
     }
+    items.push({ label: '🔗 插入内部笔记链接…', action: () => { hideContextMenu(); openLinkPicker() } })
+    items.push({ label: '标题', submenu: headings })
+    items.push(
+        { label: '加粗', action: () => liveSurround('**', '**', '加粗文本', pos, selRange, lineNo) },
+        { label: '斜体', action: () => liveSurround('*', '*', '斜体文本', pos, selRange, lineNo) },
+        { label: '删除线', action: () => liveSurround('~~', '~~', '删除线', pos, selRange, lineNo) },
+        { label: '高亮', action: () => liveSurround('==', '==', '高亮', pos, selRange, lineNo) },
+        { label: '行内代码', action: () => liveSurround('`', '`', '代码', pos, selRange, lineNo) },
+        { label: '代码块', action: () => liveSurround('\n```\n', '\n```\n', '代码', pos, selRange, lineNo) },
+        { label: '引用', action: prefix('> ') },
+        { label: '列表', submenu: [
+            { label: '无序列表', action: prefix('- ') },
+            { label: '有序列表', action: prefix('1. ') },
+            { label: '任务列表', action: prefix('- [ ] ') },
+        ] },
+        { label: '分割线', action: () => pos >= 0 && srcApply((f) => {
+            const norm = f.content.replace(/\r\n/g, '\n')
+            f.content = norm.slice(0, pos) + '\n---\n' + norm.slice(pos)
+        }, lineNo) },
+        { label: '表格', action: () => pos >= 0 && srcApply((f) => {
+            const norm = f.content.replace(/\r\n/g, '\n')
+            f.content = norm.slice(0, pos) + TABLE_SNIPPET + norm.slice(pos)
+        }, lineNo) },
+    )
+    // 行操作（Obsidian 高频）：复制 / 删除 / 上移 / 下移当前行
+    items.push(
+        { label: '⧉ 复制当前行', action: () => lineNo >= 0 && srcApply((f) => {
+            const lines = f.content.split('\n'); lines.splice(lineNo + 1, 0, lines[lineNo]); f.content = lines.join('\n')
+        }, lineNo + 1) },
+        { label: '⬆ 上移当前行', action: () => lineNo > 0 && srcApply((f) => {
+            const lines = f.content.split('\n'); const t = lines[lineNo]; lines[lineNo] = lines[lineNo - 1]; lines[lineNo - 1] = t; f.content = lines.join('\n')
+        }, lineNo - 1) },
+        { label: '⬇ 下移当前行', action: () => lineNo >= 0 && lineNo < state.currentFile.content.split('\n').length - 1 && srcApply((f) => {
+            const lines = f.content.split('\n'); const t = lines[lineNo]; lines[lineNo] = lines[lineNo + 1]; lines[lineNo + 1] = t; f.content = lines.join('\n')
+        }, lineNo + 1) },
+        { label: '🗑 删除当前行', danger: true, action: () => lineNo >= 0 && srcApply((f) => {
+            const lines = f.content.split('\n'); lines.splice(lineNo, 1); f.content = lines.join('\n')
+        }, Math.max(0, lineNo - 1)) },
+    )
     const pluginCmds = PluginManager.commands()
     if (pluginCmds.length) {
         items.push({ label: '🧩 插件命令', submenu: pluginCmds.map((c) => ({ label: c.label, action: () => PluginManager.runCommand(c) })) })
     }
     if (items.length) showContextMenu(e.clientX, e.clientY, items)
+}
+
+// 实时模式包裹选区（或光标处插入修饰符对）；多行选区逐行包裹；无选区只插修饰符、光标居中
+function liveSurround(before, after, placeholder, pos, selRange, lineNo) {
+    const f = state.currentFile
+    if (!f) return
+    if (selRange) {
+        const text = f.content.slice(selRange.start, selRange.end) || placeholder
+        const isBlockSyntax = before.startsWith('\n')
+        const wrapped = text.includes('\n') && !isBlockSyntax
+            ? text.split('\n').map((ln) => before + ln + after).join('\n')
+            : before + text + after
+        srcApply((ff) => {
+            const norm = ff.content.replace(/\r\n/g, '\n')
+            ff.content = norm.slice(0, selRange.start) + wrapped + norm.slice(selRange.end)
+        })
+    } else if (pos >= 0) {
+        // 行编辑中：直接在编辑器内插入修饰符对（不重渲染不跳转），光标进入修饰符之间等待输入
+        if (liveEdit && liveEdit.ta && liveEdit.mode === 'line') {
+            const caret = liveEdit.ta.selectionStart || 0
+            const cur = liveEdit.ta.value
+            liveEdit.ta.value = cur.slice(0, caret) + before + after + cur.slice(caret)
+            liveEdit.ta.focus()
+            liveEdit.ta.setSelectionRange(caret + before.length, caret + before.length)
+            flushLineEditValue()   // 同步到源（不重渲染）
+            updateLineStatus()
+            return
+        }
+        // 非行编辑：插入修饰符对并尝试重开行编辑定位光标
+        const beforeLen = before.length
+        const insert = before + after
+        srcApply((ff) => {
+            const norm = ff.content.replace(/\r\n/g, '\n')
+            ff.content = norm.slice(0, pos) + insert + norm.slice(pos)
+        }, lineNo)
+        if (lineNo >= 0) {
+            setTimeout(() => {
+                openLineAt(lineNo)
+                if (liveEdit && liveEdit.ta) {
+                    const lineStart = lineSrcOffset(liveEdit.lineNo)
+                    const caret = pos + beforeLen - lineStart
+                    liveEdit.ta.focus()
+                    liveEdit.ta.setSelectionRange(Math.max(0, caret), Math.max(0, caret))
+                }
+            }, 0)
+        }
+    }
 }
 els.liveEditor.addEventListener('contextmenu', handleLiveEditorCtxMenu)
 
@@ -4890,7 +5588,7 @@ document.getElementById('closewindow').addEventListener('click', () => window.el
 // 主进程请求确认关闭：有未保存修改就弹自研确认框，确认后放行关闭。
 // 覆盖所有关闭途径：关闭按钮 / Alt+F4 / 任务栏
 window.electronAPI.onConfirmClose(async () => {
-    if (liveEditingBlk && document.body.contains(liveEditingBlk)) commitBlockEdit(liveEditingBlk)   // 先把未提交的块编辑落进 content
+    if (liveEdit) commitLineEdit()   // 先把未提交的行编辑落进 content
     if (anyDirty()) {
         const ok = await window.confirm('有文件未保存，确定退出吗？')
         if (!ok) return
@@ -4950,10 +5648,9 @@ document.addEventListener('keydown', (e) => {
         || !!(els.batchDialogOverlay && !els.batchDialogOverlay.classList.contains('hidden'))
         || !!document.getElementById('pluginStore') && !document.getElementById('pluginStore').classList.contains('hidden')
     if (modalOpen) return
-    // 块编辑未提交时，Ctrl+S / Ctrl+W 先把块内容提交进 content，避免写旧版本或静默丢编辑
-    if (mod && liveEditingBlk && document.body.contains(liveEditingBlk)
-        && (e.key.toLowerCase() === 's' || e.key.toLowerCase() === 'w')) {
-        commitBlockEdit(liveEditingBlk)
+    // 行编辑未提交时，Ctrl+S / Ctrl+W 先把行内容提交进 content，避免写旧版本或静默丢编辑
+    if (mod && liveEdit && (e.key.toLowerCase() === 's' || e.key.toLowerCase() === 'w')) {
+        commitLineEdit()
     }
     // 切换器 / 命令面板 / Git 面板输入框聚焦时，除 Esc 与 Ctrl+P / Ctrl+Shift+P 外全局键不生效
     const t = e.target
@@ -4967,6 +5664,11 @@ document.addEventListener('keydown', (e) => {
     if (mod && e.key.toLowerCase() === 's') {
         e.preventDefault()          // 阻止浏览器默认的"另存为"
         saveFile()
+        return
+    }
+    if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        e.preventDefault()          // Ctrl+Z：撤销上次行编辑（提交 / 移动 / 回车换行前）
+        undoLineEdit()
         return
     }
     if (mod && e.key.toLowerCase() === 'f') {

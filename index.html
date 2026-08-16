@@ -1158,7 +1158,7 @@
             background: var(--bg-surface);
             color: var(--text);
             font-family: "Cascadia Code", Consolas, "Microsoft YaHei", monospace;
-            font-size: 14px;
+            font-size: 16px;
             line-height: 1.7;
             tab-size: 4;
         }
@@ -1247,9 +1247,8 @@
             border-radius: 4px;
             transition: background var(--transition), box-shadow var(--transition);
         }
+        /* Obsidian 式清爽：悬停不出现任何阴影 / 高亮底，仅提示可编辑文本 */
         .blk:hover {
-            background: var(--accent-soft);
-            box-shadow: inset 0 0 0 1px var(--border);
             cursor: text;
         }
         .blk.editing {
@@ -1278,6 +1277,40 @@
         .blk.flash {
             animation: blkFlash 0.9s ease;
         }
+        /* Obsidian 行渲染：点击行 → 该行文字变为可编辑的 Markdown 源码。
+           零视觉：无边框、无背景、无阴影、字体与预览完全一致，仅光标代表可编辑 */
+        .line-inline {
+            width: 100%;
+            height: auto;
+            border: none;
+            border-radius: 0;
+            background: transparent;
+            color: var(--text);
+            font-family: inherit;      /* 与预览同字体，不换字体 */
+            font-size: 17px;           /* 与预览正文（.md-body 17px）完全一致，编辑不跳字号 */
+            font-weight: inherit;
+            font-style: inherit;
+            line-height: 1.7;
+            letter-spacing: inherit;
+            padding: 0;
+            margin: 0;
+            outline: none;
+            resize: none;
+            overflow: hidden;
+            box-shadow: none;          /* 无分割线 / 无光晕 */
+            box-sizing: border-box;
+            vertical-align: baseline;
+            white-space: pre-wrap;
+            cursor: text;
+            field-sizing: content;     /* 高度随内容自适应（单行编辑不出现换行问题） */
+        }
+        .line-inline.block-inline {
+            min-height: 100px;
+            font-family: "Cascadia Code", Consolas, "Microsoft YaHei", monospace;
+            font-size: 17px;           /* 与正文一致：整块（表格/代码）编辑同样不跳字号 */
+            white-space: pre;
+            field-sizing: normal;
+        }
 
         /* 预览面板（阅读列宽：大窗口居中限宽，小窗口保持留白） */
         .previewPane {
@@ -1304,7 +1337,7 @@
         .md-body {
             padding: 6px;
             line-height: 1.8;
-            font-size: 15px;
+            font-size: 17px;   /* 大字号阅读更清爽 */
             overflow-wrap: break-word;
         }
         .md-body h1,
@@ -1351,13 +1384,34 @@
         .md-body li {
             margin: 0.3em 0;
         }
+        .md-body ul li::marker {
+            color: var(--accent-strong);
+        }
+        .md-body ol li::marker {
+            color: var(--accent-strong);
+            font-weight: 600;
+        }
+        .md-body strong {
+            color: var(--text);
+        }
         .md-body blockquote {
+            position: relative;
             border-left: 3px solid var(--accent);
             background: var(--accent-soft);
             margin: 0.9em 0;
             padding: 0.5em 1.1em;
             color: var(--text-muted);
             border-radius: 0 8px 8px 0;
+        }
+        .md-body blockquote::before {
+            content: '❝';
+            position: absolute;
+            left: 6px;
+            top: -4px;
+            font-size: 20px;
+            color: var(--accent);
+            opacity: 0.55;
+            pointer-events: none;
         }
         .md-body pre {
             background: var(--code-bg);
@@ -1382,7 +1436,7 @@
         }
         .md-body code {
             font-family: "Cascadia Code", Consolas, monospace;
-            font-size: 12.5px;
+            font-size: 14px;
             background: var(--code-bg);
             padding: 2px 6px;
             border-radius: 5px;
@@ -1392,7 +1446,7 @@
             background: none;
             border: none;
             padding: 0;
-            font-size: 13px;
+            font-size: 14.5px;
         }
         .md-body table {
             border-collapse: separate;
@@ -1424,6 +1478,9 @@
         .md-body tbody tr:nth-child(even) {
             background: var(--bg-app);
         }
+        .md-body tbody tr:hover {
+            background: var(--accent-soft);
+        }
         .md-body hr {
             border: none;
             border-top: 1px solid var(--border);
@@ -1432,6 +1489,10 @@
         .md-body img {
             max-width: 100%;
             border-radius: 8px;
+            transition: box-shadow var(--transition);
+        }
+        .md-body img:hover {
+            box-shadow: 0 8px 22px var(--accent-soft);
         }
         /* 阅读选区：accent 底 + 白字，反衬更清晰 */
         .md-body ::selection,
@@ -3776,6 +3837,12 @@
     <div class="quickSwitcher hidden" id="commandPalette">
         <input id="cpInput" placeholder="输入命令…  Enter 执行 · ↑↓ 选择 · Esc 关闭" autocomplete="off" spellcheck="false">
         <div id="cpResults"></div>
+    </div>
+
+    <!-- 插入内部笔记链接选择器（Obsidian 风格）：输入笔记名搜索选择 -->
+    <div class="quickSwitcher linkPicker hidden" id="linkPicker">
+        <input id="lkInput" placeholder="🔗 输入笔记名称搜索…  Enter 插入 · ↑↓ 选择 · Esc 关闭" autocomplete="off" spellcheck="false">
+        <div id="lkResults"></div>
     </div>
 
     <!-- 悬浮提示 -->

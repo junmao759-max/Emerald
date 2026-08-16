@@ -350,10 +350,10 @@
         }
         /* 应用 Logo（icon.png）：顶栏标题前的图标，圆角小尺寸 */
         .appLogo {
-            width: 16px;
-            height: 16px;
+            width: 20px;
+            height: 20px;
             flex: none;
-            margin-right: 7px;
+            margin-right: 8px;
             border-radius: 3px;
             -webkit-user-drag: none;
             user-select: none;
@@ -589,8 +589,8 @@
             z-index: 1;      /* 盖在氛围光斑之上 */
         }
         .launchLogo {
-            width: 64px;
-            height: 64px;
+            width: 80px;
+            height: 80px;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -3057,8 +3057,8 @@
             border-bottom: 1px solid var(--border);
         }
         .settingsLogo {
-            width: 38px;
-            height: 38px;
+            width: 44px;
+            height: 44px;
             flex: none;
             display: flex;
             align-items: center;
@@ -3136,6 +3136,78 @@
             border-top: 1px solid var(--border);
             font-size: 11px;
             color: var(--icon-muted);
+            text-align: center;
+        }
+
+        /* ============================================================
+         * 使用帮助（新手引导 + 快捷键 + 功能导览）
+         * ============================================================ */
+        .helpCard {
+            width: 560px;
+            max-width: 92vw;
+            max-height: 84vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            padding: 0;
+            border-radius: 14px;
+        }
+        .helpBrand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 18px 22px 14px;
+            background: linear-gradient(135deg, var(--accent-soft), transparent 60%);
+            border-bottom: 1px solid var(--border);
+        }
+        .helpTitle {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--text);
+        }
+        .helpSub {
+            font-size: 11.5px;
+            color: var(--text-muted);
+            margin-top: 1px;
+        }
+        .helpBody {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 14px 18px;
+        }
+        .helpText {
+            font-size: 12.5px;
+            line-height: 1.75;
+            color: var(--text);
+        }
+        .helpText b { color: var(--accent-strong); }
+        .helpText code {
+            font-family: "Cascadia Code", Consolas, monospace;
+            font-size: 11.5px;
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 1px 5px;
+        }
+        .helpRow {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 12.5px;
+            color: var(--text);
+            padding: 3px 0;
+        }
+        .helpRow kbd {
+            font-family: "Cascadia Code", Consolas, monospace;
+            font-size: 11px;
+            background: var(--bg-app);
+            border: 1px solid var(--border-strong);
+            border-bottom-width: 2px;
+            border-radius: 4px;
+            padding: 1px 6px;
+            color: var(--text);
+            min-width: 16px;
             text-align: center;
         }
 
@@ -3401,7 +3473,7 @@
         <button class="launchWinBtn" id="launchClose" title="关闭">✕</button>
         <div class="launchCard">
             <div class="launchLogo">
-                <img class="launchLogoImg" src="./icon.png" alt="Emerald" draggable="false">
+                <img class="launchLogoImg" src="./app-icon.png" alt="Emerald" draggable="false">
             </div>
             <h1>Emerald</h1>
             <p class="launchSub">选择一个文件夹作为工作区，开始你的文件管理</p>
@@ -3412,7 +3484,7 @@
                 <button class="session-btn" id="sessionRestoreBtn">恢复上次会话</button>
             </div>
             <div class="launchErr" id="launchErr"></div>
-            <div class="launchHints">Ctrl+P 搜索 &nbsp;·&nbsp; Ctrl+Shift+P 命令 &nbsp;·&nbsp; Ctrl+S 保存</div>
+            <div class="launchHints">Ctrl+P 搜索 &nbsp;·&nbsp; Ctrl+Shift+P 命令 &nbsp;·&nbsp; Ctrl+S 保存 &nbsp;·&nbsp; <button class="session-btn" id="launchHelpBtn" style="padding:2px 8px;font-size:11px;">📖 使用帮助</button></div>
         </div>
     </div>
 
@@ -3481,7 +3553,7 @@
                         <svg class="icon" id="forwardBtn" title="前进" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" width="20" height="20"><path d="M918.6 489.3L646.1 216.8c-12.3-12.3-32.5-12.3-44.8 0l-0.7 0.7c-12.3 12.3-12.3 32.4 0 44.7l218.7 218.7H257.6c-17.3 0-31.5 14.2-31.5 31.5s14.2 31.5 31.5 31.5h560.1L601.2 760.5c-12.5 12.5-12.5 32.9 0 45.4s32.9 12.5 45.4 0l271.1-271.1s0.1-0.1 0.2-0.1l0.7-0.7c12.3-12.3 12.3-32.4 0-44.7z" fill="#515151"></path><path d="M97.6 512.6a31.8 31.7 0 1 0 63.6 0 31.8 31.7 0 1 0-63.6 0Z" fill="#515151"></path></svg>
                     </div>
                     <div class="TextContainer">
-                        <img class="appLogo" src="./icon.png" alt="Emerald" draggable="false">
+                        <img class="appLogo" src="./app-icon.png" alt="Emerald" draggable="false">
                         <span class="appTitle">Emerald 文件管理器</span>
                     </div>
                     <div class="rightContainer">
@@ -3491,6 +3563,7 @@
                         <svg class="icon" id="graphBtn" title="知识图谱（wikilink 可视化）" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="18" height="18"><path d="M3 5a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm7 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm7 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM3 12a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm7 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm7 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM3 19a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm7 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm7 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM5 5v2.03A3 3 0 0 0 6.97 9H9m6-4v2.03A3 3 0 0 1 16.97 9H19M5 12v2.03A3 3 0 0 0 6.97 15H9m6-3v2.03A3 3 0 0 1 16.97 15H19M5 19v0m6-10v2m0 4v2m6-8v0"/></svg>
                         <svg class="icon theme-moon" id="themeMoonBtn" title="切换到暗色主题" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="18" height="18"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
                         <svg class="icon theme-sun" id="themeSunBtn" title="切换到亮色主题" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="18" height="18"><path d="M12 2a1 1 0 0 1 1 1v1.07A7 7 0 0 1 19.93 11H21a1 1 0 1 1 0 2h-1.07A7 7 0 0 1 13 19.93V21a1 1 0 1 1-2 0v-1.07A7 7 0 0 1 4.07 13H3a1 1 0 1 1 0-2h1.07A7 7 0 0 1 11 4.07V3a1 1 0 0 1 1-1zm0 5a5 5 0 1 0 0 10 5 5 0 0 0 0-10z"/></svg>
+                        <svg class="icon" id="helpBtn" title="使用帮助（快捷键 / 功能导览）" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="18" height="18"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm1-12.5a3.5 3.5 0 0 0-3.5 3.5h1.8a1.7 1.7 0 1 1 1.7 1.7c-.8 0-1.3.6-1.3 1.4v.9h1.8v-.6a3.5 3.5 0 0 0 0-6.9zm-1 9.6a1.1 1.1 0 1 0 0 2.2 1.1 1.1 0 0 0 0-2.2z"/></svg>
                         <svg class="icon" id="settingsBtn" title="设置" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="18" height="18"><path d="M19.14 12.94a7.07 7.07 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.06 7.06 0 0 0-1.62-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 0 0-.6.22L2.5 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.38.31.6.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54a7.06 7.06 0 0 0 1.62-.94l2.39.96c.22.09.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg>
                     </div>
                 </div>
@@ -3756,7 +3829,7 @@
     <div class="modal-overlay hidden" id="settingsOverlay">
         <div class="modal-card settingsCard">
             <div class="settingsBrand">
-                <span class="settingsLogo"><img class="settingsLogoImg" src="./icon.png" alt="Emerald" draggable="false"></span>
+                <span class="settingsLogo"><img class="settingsLogoImg" src="./app-icon.png" alt="Emerald" draggable="false"></span>
                 <div>
                     <div class="settingsName">Emerald</div>
                     <div class="settingsSub">设置 · 本地优先 · 数据不出设备</div>
@@ -3819,6 +3892,65 @@
             <div class="pluginStoreList" id="pluginStoreList"></div>
             <div class="modal-actions">
                 <button class="modal-btn" id="pluginStoreClose">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 使用帮助（新手引导 + 快捷键 + 功能导览） -->
+    <div class="modal-overlay hidden" id="helpOverlay">
+        <div class="modal-card helpCard">
+            <div class="helpBrand">
+                <span class="settingsLogo"><img class="settingsLogoImg" src="./app-icon.png" alt="Emerald" draggable="false"></span>
+                <div>
+                    <div class="helpTitle">📖 使用帮助</div>
+                    <div class="helpSub">Emerald · 本地优先的 Markdown 文件管理器</div>
+                </div>
+            </div>
+            <div class="helpBody">
+                <div class="settingsSection">
+                    <div class="settingsSecTitle">🚀 快速上手</div>
+                    <div class="helpText">
+                        • 打开文件夹 = 进入工作区（标题栏「打开文件夹」或拖入文件夹）<br>
+                        • 左侧目录树点文件打开；Markdown 支持实时编辑（点块改原文，Esc 退出）<br>
+                        • 从资源管理器拖文件/文件夹进窗口即可打开<br>
+                        • 编辑后 Ctrl+S 保存；未保存的标签会显示 ●
+                    </div>
+                </div>
+                <div class="settingsSection">
+                    <div class="settingsSecTitle">⌨️ 常用快捷键</div>
+                    <div class="helpRow"><kbd>Ctrl</kbd><kbd>P</kbd> 搜索文件 / 内容</div>
+                    <div class="helpRow"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd> 命令面板（所有功能入口）</div>
+                    <div class="helpRow"><kbd>Ctrl</kbd><kbd>S</kbd> 保存当前文件</div>
+                    <div class="helpRow"><kbd>Ctrl</kbd><kbd>F</kbd> 查找 / 替换</div>
+                    <div class="helpRow"><kbd>Ctrl</kbd><kbd>W</kbd> 关闭当前标签</div>
+                    <div class="helpRow"><kbd>Ctrl</kbd><kbd>Tab</kbd> 循环切换标签</div>
+                    <div class="helpRow"><kbd>Esc</kbd> 关闭浮层 / 退出块编辑</div>
+                </div>
+                <div class="settingsSection">
+                    <div class="settingsSecTitle">🧭 功能导览</div>
+                    <div class="helpText">
+                        • <b>分屏</b>：编辑器标题栏 ▥ 按钮，或把左侧文件拖到渲染区右侧<br>
+                        • <b>Git 面板</b>：标题栏 Git 图标 —— 变更列表 / 差异 / 提交 / 推送<br>
+                        • <b>知识图谱</b>：标题栏 🕸 图标 —— 笔记 [[双向链接]] 可视化<br>
+                        • <b>AI 助手</b>：标题栏 ✨ 图标 —— 配置 Key 后提问，自动附带当前笔记<br>
+                        • <b>标签</b>：文件右键「编辑标签」，侧栏按标签过滤<br>
+                        • <b>反链</b>：笔记标题栏 🔗 按钮，查看谁引用了本文档<br>
+                        • <b>大纲</b>：右侧栏 📑 自动列出标题，点击跳转<br>
+                        • <b>批量重命名</b>：命令面板搜「批量重命名」<br>
+                        • <b>插件</b>：设置 → 插件商店，一键安装扩展
+                    </div>
+                </div>
+                <div class="settingsSection">
+                    <div class="settingsSecTitle">🧩 插件与 AI</div>
+                    <div class="helpText">
+                        • 插件是放入 <code>用户目录\plugins\</code> 或 <code>工作区\.emerald\plugins\</code> 的 .js 脚本，沙箱隔离运行<br>
+                        • 商店内置 Emoji / 日期 / 统计 / Frontmatter / 备份 五个插件，一键安装<br>
+                        • AI 需自带 API Key（DeepSeek / OpenAI / Ollama），Key 用系统安全存储加密，不出设备
+                    </div>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="modal-btn primary" id="helpClose">知道了</button>
             </div>
         </div>
     </div>

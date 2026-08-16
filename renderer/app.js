@@ -604,6 +604,10 @@ const els = {
     aiCfgOk: $('aiCfgOk'),
     dropOverlay: $('dropOverlay'),
     splitDropHint: $('splitDropHint'),
+    helpBtn: $('helpBtn'),
+    helpOverlay: $('helpOverlay'),
+    helpClose: $('helpClose'),
+    launchHelpBtn: $('launchHelpBtn'),
     graphBtn: $('graphBtn'),
     graphPanel: $('graphPanel'),
     graphStats: $('graphStats'),
@@ -3259,6 +3263,7 @@ const COMMANDS = [
     { id: 'graph.open', label: '打开知识图谱', when: () => !!state.rootPath, run: openGraph },
     { id: 'plugins.reload', label: '重新加载插件', when: () => !!state.rootPath, run: () => { PluginManager.load(state.rootPath); showNotice('插件已重新加载') } },
     { id: 'plugins.store', label: '打开插件商店', run: () => window.PluginStore.open() },
+    { id: 'help.open', label: '打开使用帮助', run: openHelp },
     { id: 'app.settings', label: '设置', run: openSettings },
 ]
 
@@ -3407,10 +3412,23 @@ let tooltipVisible = false
 function showTooltipAt(x, y, text) {
     els.tooltip.textContent = text
     els.tooltip.classList.remove('hidden')
+    els.tooltip.style.transform = 'none'   // 文件树场景：左上角定位，不带居中偏移
     const px = Math.min(x + 14, window.innerWidth - 280)
     const py = Math.min(y + 16, window.innerHeight - 44)
     els.tooltip.style.left = Math.max(4, px) + 'px'
     els.tooltip.style.top = Math.max(4, py) + 'px'
+    tooltipVisible = true
+}
+// 按钮正下方居中显示 tooltip（标题栏图标等场景）：跟随按钮位置，不被窗口钳制到同一处
+function showTooltipBelow(el, text) {
+    els.tooltip.textContent = text
+    els.tooltip.classList.remove('hidden')
+    els.tooltip.style.transform = 'translateX(-50%)'
+    const r = el.getBoundingClientRect()
+    const left = Math.max(12, Math.min(r.left + r.width / 2, window.innerWidth - 12))
+    const top = Math.max(4, r.bottom + 6)
+    els.tooltip.style.left = left + 'px'
+    els.tooltip.style.top = top + 'px'
     tooltipVisible = true
 }
 function hideTooltip() {
@@ -4795,6 +4813,13 @@ window.addEventListener('resize', () => { if (!els.graphPanel.classList.contains
 // ================================================================
 
 els.openFolderBtn.addEventListener('click', chooseFolder)
+// 标题栏图标悬停提示：原生 title 在无边框窗口显示不可靠，改用应用内 tooltip（按钮正下方）
+document.querySelectorAll('.topNav .rightContainer .icon').forEach((icon) => {
+    const tip = icon.getAttribute('title')
+    if (!tip) return
+    icon.addEventListener('mouseenter', () => showTooltipBelow(icon, tip))
+    icon.addEventListener('mouseleave', hideTooltip)
+})
 // 编辑器头部 🧩 按钮：弹出插件命令菜单（#14 商店）
 els.pluginBtn.addEventListener('click', (e) => showPluginMenu(e.clientX, e.clientY))
 // 设置面板：重新加载插件（#14）
@@ -4804,6 +4829,17 @@ els.setReloadPlugins.addEventListener('click', () => {
 })
 // 设置面板：打开插件商店
 els.setOpenStore.addEventListener('click', () => window.PluginStore.open())
+// 使用帮助（新手引导 / 快捷键 / 功能导览）
+function openHelp() {
+    els.helpOverlay.classList.remove('hidden')
+}
+function closeHelp() {
+    els.helpOverlay.classList.add('hidden')
+}
+els.helpBtn.addEventListener('click', openHelp)
+els.helpClose.addEventListener('click', closeHelp)
+if (els.launchHelpBtn) els.launchHelpBtn.addEventListener('click', openHelp)
+els.helpOverlay.addEventListener('click', (e) => { if (e.target === els.helpOverlay) closeHelp() })
 // 点击侧栏路径栏 = 切换工作区（功能与命令面板"切换工作区"一致）
 els.currentPath.addEventListener('click', () => state.rootPath && switchWorkspace())
 // 显眼的"⇄ 切换"按钮（工作区栏左侧第一个按钮）

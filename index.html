@@ -1114,25 +1114,6 @@
         .saveStatus.dirty {
             color: #d97706;
         }
-        .saveBtn {
-            flex: none;
-            padding: 5px 14px;
-            border: none;
-            border-radius: 6px;
-            background: var(--accent);
-            color: #fff;
-            font-size: 13px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: background var(--transition), opacity var(--transition);
-        }
-        .saveBtn:hover:not(:disabled) {
-            background: var(--accent-strong);
-        }
-        .saveBtn:disabled {
-            opacity: 0.4;
-            cursor: default;
-        }
         .viewModeBtn {
             flex: none;
             padding: 4px 10px;
@@ -1311,6 +1292,18 @@
             white-space: pre;
             field-sizing: normal;
         }
+        /* 富文本行编辑（内容可编辑层）：加粗/斜体/删除线/高亮保持渲染态，
+           块级铺满行容器，字体与预览完全一致，避免编辑时位移 */
+        .line-inline.line-ce {
+            display: block;
+            width: 100%;
+            min-height: 1.4em;
+            cursor: text;
+            overflow-wrap: break-word;
+        }
+        .line-inline.line-ce:focus {
+            outline: none;
+        }
 
         /* 预览面板（阅读列宽：大窗口居中限宽，小窗口保持留白） */
         .previewPane {
@@ -1398,6 +1391,13 @@
         }
         .md-body strong {
             color: var(--text);
+        }
+        /* 高亮 ==text==（Emerald 淡绿色） */
+        .md-body mark {
+            background: #d1fae5;      /* emerald-100，契合应用名 Emerald */
+            color: var(--text);
+            border-radius: 3px;
+            padding: 0 3px;
         }
         .md-body blockquote {
             position: relative;
@@ -2625,7 +2625,6 @@
         /* E2：按钮统一按压反馈 */
         .ws-btn:active,
         .viewModeBtn:active,
-        .saveBtn:active,
         .modal-btn:active,
         .tabAddBtn:active,
         .sidebar-expand:active,
@@ -3511,7 +3510,6 @@
          * ============================================================ */
         .ws-btn:focus-visible,
         .viewModeBtn:focus-visible,
-        .saveBtn:focus-visible,
         .modal-btn:focus-visible,
         .tab:focus-visible,
         .tabAddBtn:focus-visible,
@@ -3708,7 +3706,6 @@
                                     <span class="fileMeta" id="fileMeta"></span>
                                     <span class="saveStatus" id="saveStatus">已保存</span>
                                     <button class="viewModeBtn pluginBtn" id="pluginBtn" title="插件命令（🧩）">🧩</button>
-                                    <button class="saveBtn" id="saveBtn" disabled>保存</button>
                                     <button class="splitBtn" id="splitBtn" title="分屏（▥）/ 取消分屏">▥</button>
                                 </div>
                                 <div class="pane-empty hidden" id="pane0Empty">点击左侧文件在此打开</div>

@@ -80,6 +80,8 @@
         + renderInlineEscaped(shown.trim()) + '</a>')
     })
 
+    // 高亮 ==text==（Emerald 淡绿色；放在加粗之前，使 **==x==** / ==**x**== 都能渲染）
+    text = text.replace(/==([^=\n]+)==/g, '<mark>$1</mark>')
     // 加粗 **text**
     text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     // 删除线 ~~text~~

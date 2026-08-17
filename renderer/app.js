@@ -86,7 +86,6 @@ function paneEls(i) {
             backlinksBtn: els.backlinksBtn,
             fileMeta: els.fileMeta,
             saveStatus: els.saveStatus,
-            saveBtn: els.saveBtn,
             editor: els.editor,
             liveEditor: els.liveEditor,
             previewPane: els.previewPane,
@@ -124,10 +123,9 @@ function createPaneDom() {
     const backlinksBtn = document.createElement('button'); backlinksBtn.className = 'viewModeBtn'; backlinksBtn.style.display = 'none'; backlinksBtn.textContent = '🔗 反链'; backlinksBtn.title = '查看引用了本文档的笔记'
     const fileMeta = document.createElement('span'); fileMeta.className = 'fileMeta'
     const saveStatus = document.createElement('span'); saveStatus.className = 'saveStatus'; saveStatus.textContent = '已保存'
-    const saveBtn = document.createElement('button'); saveBtn.className = 'saveBtn'; saveBtn.disabled = true; saveBtn.textContent = '保存'
     const pluginBtn = document.createElement('button'); pluginBtn.className = 'viewModeBtn pluginBtn'; pluginBtn.textContent = '🧩'; pluginBtn.title = '插件命令'
     pluginBtn.addEventListener('click', (e) => showPluginMenu(e.clientX, e.clientY))
-    header.append(typeBadge, title, viewModeBtn, backlinksBtn, fileMeta, saveStatus, saveBtn, pluginBtn)
+    header.append(typeBadge, title, viewModeBtn, backlinksBtn, fileMeta, saveStatus, pluginBtn)
 
     const empty = document.createElement('div'); empty.className = 'pane-empty hidden'; empty.textContent = '点击左侧文件在此打开'
     const editor = document.createElement('textarea'); editor.className = 'editor'; editor.spellcheck = false; editor.wrap = 'off'
@@ -161,7 +159,6 @@ function createPaneDom() {
     })
     viewModeBtn.addEventListener('click', () => { setActivePane(1); toggleViewMode() })
     backlinksBtn.addEventListener('click', () => { setActivePane(1); showBacklinks() })
-    saveBtn.addEventListener('click', () => { setActivePane(1); saveFile() })
     close.addEventListener('click', closeBacklinks)
     liveEditor.addEventListener('click', handleLiveEditorClick)
     liveEditor.addEventListener('contextmenu', handleLiveEditorCtxMenu)
@@ -169,7 +166,7 @@ function createPaneDom() {
     previewContent.addEventListener('click', handlePreviewClick)
 
     return {
-        pane, title, typeBadge, viewModeBtn, backlinksBtn, fileMeta, saveStatus, saveBtn, pluginBtn,
+        pane, title, typeBadge, viewModeBtn, backlinksBtn, fileMeta, saveStatus, pluginBtn,
         editor, liveEditor, previewPane, previewContent, backlinksPanel, backlinksList: list,
         backlinksClose: close, empty,
     }
@@ -508,7 +505,6 @@ const els = {
     fileTypeBadge: $('fileTypeBadge'),
     fileMeta: $('fileMeta'),
     saveStatus: $('saveStatus'),
-    saveBtn: $('saveBtn'),
     pluginBtn: $('pluginBtn'),
     viewModeBtn: $('viewModeBtn'),
     previewPane: $('previewPane'),
@@ -1204,7 +1200,6 @@ function renderPane(i) {
         P.viewModeBtn.style.display = 'none'
         P.backlinksBtn.style.display = 'none'
         P.saveStatus.textContent = ''
-        P.saveBtn.disabled = true
         return
     }
     P.empty.classList.add('hidden')
@@ -1393,7 +1388,9 @@ function handleLiveEditorMouseDown(e) {
     const t = e.target
     if (!t || !t.closest) return
     if (t.closest('.line-inline')) return                              // 行编辑器内部（移动光标）
-    if (t.closest('input[type=checkbox], .wikilink, a[href]')) return  // 交互元素交回 click
+    if (t.closest('input[type=checkbox], a[href]')) return             // 勾选框/普通链接交回 click
+    // wikilink：普通点击 = 进入行编辑（可编辑 [[...]] 源码）；Ctrl/Cmd+点击 = 跳转（交回 click）
+    if (t.closest('.wikilink') && (e.ctrlKey || e.metaKey)) return
     if (liveEdit) commitLineEdit()                                     // 先提交当前行（同步重渲染）
     const hit = document.elementFromPoint(e.clientX, e.clientY) || t   // 重渲染后用坐标重新定位
     const blk = hit.closest('.blk[data-s]')
@@ -1408,8 +1405,16 @@ function handleLiveEditorClick(e) {
     // 交互元素优先处理（先提交未完成的行编辑）；行编辑已由 mousedown 处理
     const cb = e.target.closest('input[type=checkbox][data-line]')
     if (cb) { if (liveEdit) commitLineEdit(); toggleTaskLine(cb); return }
+    // wikilink：Ctrl/Cmd+点击才跳转；普通点击已由 mousedown 进入行编辑（[[...]] 可直接编辑）
     const wl = e.target.closest('.wikilink')
-    if (wl) { if (liveEdit) commitLineEdit(); e.preventDefault(); openWikilink(wl.getAttribute('data-target')); return }
+    if (wl) {
+        if (e.ctrlKey || e.metaKey) {
+            if (liveEdit) commitLineEdit()
+            e.preventDefault()
+            openWikilink(wl.getAttribute('data-target'))
+        }
+        return
+    }
     const link = e.target.closest('a[href]')
     if (link) {
         if (liveEdit) commitLineEdit()
@@ -1555,7 +1560,196 @@ function renderOffsetToSrc(renderText, srcLine, renderOff) {
     return Math.min(s, srcLine.length)
 }
 
-// 打开指定行编辑（点击 / 回车前进共用）；caret 为行内光标偏移（-1 = 行尾）
+// ================================================================
+// 富文本行编辑（Obsidian 式）：行内加粗 / 删除线 / 斜体 / 高亮在编辑态保持渲染，
+// 修饰符不直接显示；点击对应文本才暴露修饰符（便于修改）。其余（链接、代码、
+// wikilink 等）仍以原始 Markdown 文本显示，可直接编辑。
+// 实现：用 contenteditable div 取代 textarea，并为其模拟 textarea 的
+// value / selectionStart / selectionEnd / setSelectionRange 接口，
+// 让既有的行编辑管线（commit/move/enter/liveSurround…）无需改动。
+// ================================================================
+
+// 源行 → 富文本 HTML（只处理四种行内样式；输入已转义）
+function lineToRichHtml(srcLine) {
+    let s = escapeHtml(String(srcLine == null ? '' : srcLine))
+    s = s.replace(/==([^=\n]+)==/g, '<mark data-mk="==">$1</mark>')
+    s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong data-mk="**">$1</strong>')
+    s = s.replace(/~~([^~\n]+)~~/g, '<del data-mk="~~">$1</del>')
+    s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em data-mk="*">$2</em>')
+    return s
+}
+
+// 序列化：DOM → Markdown 行（给带 data-mk 的样式元素补回修饰符）
+function richLineValue(el) {
+    let out = ''
+    const walk = (node) => {
+        if (node.nodeType === 3) { out += node.data; return }
+        if (node.nodeType !== 1) return
+        const tag = node.tagName.toLowerCase()
+        if (tag === 'br') return   // 行模式不产生换行
+        const mk = node.getAttribute ? node.getAttribute('data-mk') : null
+        if (mk) out += mk
+        for (const ch of node.childNodes) walk(ch)
+        if (mk) out += mk
+    }
+    for (const ch of el.childNodes) walk(ch)
+    return out
+}
+
+// 渲染偏移（DOM 光标）→ 源偏移（含隐藏修饰符）
+function richCaretToSrc(el, renderOff) {
+    let src = 0
+    let seen = 0
+    let found = -1
+    const walk = (node) => {
+        if (found >= 0) return
+        if (node.nodeType === 3) {
+            const len = node.data.length
+            if (renderOff >= seen && renderOff <= seen + len) { found = src + (renderOff - seen); return }
+            seen += len
+            src += len
+            return
+        }
+        if (node.nodeType !== 1) return
+        const tag = node.tagName.toLowerCase()
+        if (tag === 'br') {
+            if (renderOff === seen) { found = src; return }
+            seen += 1
+            src += 1
+            return
+        }
+        const mk = node.getAttribute ? node.getAttribute('data-mk') : null
+        if (mk) src += mk.length
+        for (const ch of node.childNodes) walk(ch)
+        if (found >= 0) return
+        if (mk) src += mk.length
+    }
+    walk(el)
+    return found >= 0 ? found : src
+}
+
+// 源偏移 → DOM 光标位置
+function richSrcToPoint(el, srcOffset) {
+    let src = 0
+    const walk = (node) => {
+        if (node.nodeType === 3) {
+            const len = node.data.length
+            if (srcOffset <= src + len) return { node, off: srcOffset - src }
+            src += len
+            return null
+        }
+        if (node.nodeType !== 1) return null
+        const tag = node.tagName.toLowerCase()
+        if (tag === 'br') {
+            if (srcOffset === src) return { node, off: 0 }
+            src += 1
+            return null
+        }
+        const mk = node.getAttribute ? node.getAttribute('data-mk') : null
+        if (mk) src += mk.length
+        for (const ch of node.childNodes) {
+            const r = walk(ch)
+            if (r) return r
+        }
+        if (mk) src += mk.length
+        return null
+    }
+    const r = walk(el)
+    if (r) return r
+    // 越界：定位到最后一个文本节点末尾
+    const lastText = (() => {
+        let out = null
+        const w = (n) => {
+            if (n.nodeType === 3) out = n
+            else if (n.nodeType === 1) for (const ch of n.childNodes) w(ch)
+        }
+        w(el)
+        return out
+    })()
+    if (lastText) return { node: lastText, off: lastText.data.length }
+    return { node: el, off: 0 }
+}
+
+// 创建富文本行编辑器（模拟 textarea 接口）
+function createRichLineEditor(srcLine) {
+    const el = document.createElement('div')
+    el.className = 'line-inline line-ce'
+    el.contentEditable = 'true'
+    el.spellcheck = false
+    el.innerHTML = lineToRichHtml(srcLine) || '<br>'
+
+    Object.defineProperty(el, 'value', {
+        get: () => richLineValue(el),
+        set: (v) => { el.innerHTML = lineToRichHtml(v) || '<br>' },
+        enumerable: true,
+        configurable: true,
+    })
+
+    const caretOffset = (useEnd) => {
+        const sel = window.getSelection()
+        if (!sel || sel.rangeCount === 0) return richLineValue(el).length
+        const range = sel.getRangeAt(0)
+        if (!el.contains(range.startContainer)) return 0
+        const pre = document.createRange()
+        pre.selectNodeContents(el)
+        pre.setEnd(useEnd ? range.endContainer : range.startContainer, useEnd ? range.endOffset : range.startOffset)
+        return richCaretToSrc(el, pre.toString().length)
+    }
+    Object.defineProperty(el, 'selectionStart', { get: () => caretOffset(false), enumerable: true, configurable: true })
+    Object.defineProperty(el, 'selectionEnd', { get: () => caretOffset(true), enumerable: true, configurable: true })
+
+    el.setSelectionRange = (start, end) => {
+        const pt = richSrcToPoint(el, end == null ? start : end)
+        try {
+            const r = document.createRange()
+            if (pt) { r.setStart(pt.node, pt.off); r.setEnd(pt.node, pt.off) }
+            else { r.selectNodeContents(el); r.collapse(false) }
+            const sel = window.getSelection()
+            sel.removeAllRanges()
+            sel.addRange(r)
+        } catch { /* 定位失败时保持现状 */ }
+        el.focus()
+    }
+
+    // 点击样式化文本 → 暴露修饰符（**text** / ~~text~~ / *text* / ==text==），光标落在修饰符之间
+    el.addEventListener('click', (e) => {
+        const t = e.target
+        if (!t || t.nodeType !== 1) return
+        const mk = t.getAttribute && t.getAttribute('data-mk')
+        if (mk && /^(STRONG|DEL|EM|MARK)$/.test(t.tagName)) {
+            e.preventDefault()
+            e.stopPropagation()
+            const text = t.textContent
+            const node = document.createTextNode(mk + text + mk)
+            t.parentNode.replaceChild(node, t)
+            try {
+                const r = document.createRange()
+                r.setStart(node, mk.length)
+                r.setEnd(node, mk.length)
+                const sel = window.getSelection()
+                sel.removeAllRanges()
+                sel.addRange(r)
+            } catch { /* noop */ }
+            el.focus()
+            updateLineStatus()
+        }
+    })
+
+    // 粘贴只插纯文本（不引入富文本/换行）
+    el.addEventListener('paste', (e) => {
+        e.preventDefault()
+        const text = (e.clipboardData || window.clipboardData).getData('text/plain')
+        if (!text) return
+        document.execCommand('insertText', false, text.replace(/\r?\n/g, ' '))
+    })
+
+    // 输入时同步状态栏（行/列/最后光标源偏移）
+    el.addEventListener('input', () => updateLineStatus())
+
+    return el
+}
+
+// 打开指定行编辑（点击 / 回车前进共用）；caret 为行内源偏移（-1 = 行尾）
 function openRowEditor(blk, rowEl, lineNo, caret) {
     const paneIdx = blk.closest('.pane') ? Number(blk.closest('.pane').dataset.pane) : state.activePane
     const tab = state.tabs.find((t) => t.id === state.panes[paneIdx].tabId) || null
@@ -1563,34 +1757,20 @@ function openRowEditor(blk, rowEl, lineNo, caret) {
     if (!f || !rowEl) return
     const lines = f.content.split('\n')
     if (lineNo < 0 || lineNo >= lines.length) return
+    const ta = createRichLineEditor(lines[lineNo])
     // 分割线（hr）是自闭合元素，无子节点可替换 → 直接替换元素本身
     if (rowEl.tagName === 'HR') {
-        const ta = document.createElement('textarea')
-        ta.className = 'line-inline'
-        ta.value = lines[lineNo]
-        ta.spellcheck = false
-        ta.wrap = 'off'
         rowEl.parentNode.replaceChild(ta, rowEl)
-        liveEdit = { mode: 'line', paneIdx, path: f.path, blk, lineNo, s: parseInt(blk.dataset.s, 10), e: parseInt(blk.dataset.e, 10), ta, cancel: false }
-        bindLineEditorEvents(ta)
-        const pos = (caret != null && caret >= 0) ? Math.min(caret, ta.value.length) : ta.value.length
-        ta.setSelectionRange(pos, pos)
-        updateLineStatus()
-        return
+    } else {
+        // 整行容器内容就地替换为透明行编辑器（零视觉：无边框 / 无阴影 / 字体与预览一致）
+        const range = document.createRange()
+        range.selectNodeContents(rowEl)
+        range.deleteContents()
+        range.insertNode(ta)
     }
-    // 整行容器内容就地替换为透明行编辑器（零视觉：无边框 / 无阴影 / 字体与预览一致）
-    const range = document.createRange()
-    range.selectNodeContents(rowEl)
-    const ta = document.createElement('textarea')
-    ta.className = 'line-inline'
-    ta.value = lines[lineNo]
-    ta.spellcheck = false
-    ta.wrap = 'off'
-    range.deleteContents()
-    range.insertNode(ta)
     liveEdit = { mode: 'line', paneIdx, path: f.path, blk, lineNo, s: parseInt(blk.dataset.s, 10), e: parseInt(blk.dataset.e, 10), ta, cancel: false }
     bindLineEditorEvents(ta)
-    // 光标停在点击位置（或行尾）
+    // 光标停在点击位置（或行尾）；caret 为源偏移，内部映射到渲染位置
     const pos = (caret != null && caret >= 0) ? Math.min(caret, ta.value.length) : ta.value.length
     ta.setSelectionRange(pos, pos)
     updateLineStatus()
@@ -1619,11 +1799,7 @@ function openLineAt(lineNo, paneIdx, caret) {
     const tab = state.tabs.find((t) => t.id === state.panes[idx].tabId) || null
     const f = tab && tab.path ? tab : null
     if (!f) return
-    const ta = document.createElement('textarea')
-    ta.className = 'line-inline'
-    ta.value = ''
-    ta.spellcheck = false
-    ta.wrap = 'off'
+    const ta = createRichLineEditor('')
     const nextBlk = blks.find((b) => parseInt(b.dataset.s, 10) > lineNo)
     const bodyEl = P.liveEditor.querySelector('.md-body')
     if (nextBlk) nextBlk.parentNode.insertBefore(ta, nextBlk)
@@ -1665,7 +1841,9 @@ function bindLineEditorEvents(ta) {
                 if (ev.ctrlKey || ev.metaKey) { ev.preventDefault(); commitLineEdit(); return }
                 return   // 块模式：Enter 换行（不拦截，textarea 默认行为）
             }
-            if (!ev.shiftKey) { ev.preventDefault(); lineEditEnter(); return }
+            // 行模式：Enter 提交前进；Shift+Enter 不产生换行（行编辑器是单行语义）
+            ev.preventDefault()
+            if (!ev.shiftKey) lineEditEnter()
             return
         }
         if (ev.key === 'ArrowUp') { ev.preventDefault(); moveLineEdit(-1); return }
@@ -1811,11 +1989,7 @@ function commitAndReopen(lineNo, caret) {
 function appendTailLineEditor(lineNo, paneIdx) {
     const idx = (paneIdx != null && state.panes[paneIdx]) ? paneIdx : state.activePane
     const P = paneEls(idx)
-    const ta = document.createElement('textarea')
-    ta.className = 'line-inline'
-    ta.value = ''
-    ta.spellcheck = false
-    ta.wrap = 'off'
+    const ta = createRichLineEditor('')
     const blks = [...P.liveEditor.querySelectorAll('.blk[data-s]')]
     const nextBlk = blks.find((b) => parseInt(b.dataset.s, 10) > lineNo)
     const bodyEl = P.liveEditor.querySelector('.md-body')
@@ -2245,16 +2419,55 @@ function hideAllStates() {
 // 编辑事件：内容变化时刷新"未保存"状态与标签圆点（面板 0 文本框；面板 1 由 createPaneDom 绑定 onEditorInput）
 els.editor.addEventListener('input', () => onEditorInput(0))
 
-// 刷新保存状态文字 / 按钮可用性（按面板）
+// 刷新保存状态文字 / 自动保存调度（按面板）
+// 任何内容变化都会走到这里 → 触发防抖自动保存（无需保存按钮，实时落盘）
 function updateSaveStatus(paneIndex) {
     const i = paneIndex == null ? state.activePane : paneIndex
     const P = paneEls(i)
     const pane = state.panes[i]
     const tab = state.tabs.find((t) => t.id === pane.tabId) || null
     const dirty = !!(tab && tab.path && tab.content !== tab.originalContent)
-    P.saveStatus.textContent = dirty ? '● 未保存' : '已保存'
-    P.saveStatus.classList.toggle('dirty', dirty)
-    P.saveBtn.disabled = !dirty
+    if (dirty) {
+        P.saveStatus.textContent = '● 保存中…'
+        P.saveStatus.classList.add('dirty')
+        P.saveStatus.classList.remove('fail')
+        scheduleAutoSave()
+    } else {
+        P.saveStatus.textContent = '已保存'
+        P.saveStatus.classList.remove('dirty', 'fail')
+    }
+}
+
+// —— 自动保存（实时落盘）：防抖 600ms，写入所有有未保存修改的标签 ——
+let autoSaveTimer = null
+function scheduleAutoSave() {
+    clearTimeout(autoSaveTimer)
+    autoSaveTimer = setTimeout(autoSaveAll, 600)
+}
+
+async function autoSaveAll() {
+    autoSaveTimer = null
+    for (const tab of state.tabs) {
+        if (!tab || !tab.path || typeof tab.content !== 'string') continue
+        if (tab.content === tab.originalContent) continue
+        const res = await window.electronAPI.writeFile(tab.path, tab.content)
+        if (!res.ok) {
+            // 落盘失败：保持"未保存"状态并提示，下次输入会重试
+            for (let i = 0; i < state.panes.length; i++) {
+                const P = paneEls(i)
+                if (state.panes[i].tabId === tab.id) {
+                    P.saveStatus.textContent = '⚠ 保存失败'
+                    P.saveStatus.classList.add('fail')
+                }
+            }
+            continue
+        }
+        tab.originalContent = tab.content
+        for (let i = 0; i < state.panes.length; i++) {
+            if (state.panes[i].tabId === tab.id) updateSaveStatus(i)
+        }
+    }
+    renderTabs()
 }
 
 // 保存当前文件（写回磁盘）
@@ -2998,11 +3211,18 @@ function handleLiveEditorCtxMenu(e) {
     const sel = window.getSelection()
     let selRange = null
     if (sel && !sel.isCollapsed) {
-        const blk = target.closest('.blk[data-s]')
-        if (blk && e.currentTarget.contains(sel.anchorNode)) {
-            const a = nodeToSrcOffset(blk, sel.anchorNode, sel.anchorOffset)
-            const b = nodeToSrcOffset(blk, sel.focusNode, sel.focusOffset)
-            if (a >= 0 && b >= 0) selRange = { start: Math.min(a, b), end: Math.max(a, b) }
+        // 行编辑中：直接用模拟 selectionStart/End（源偏移，含隐藏修饰符，天然精确）
+        if (liveEdit && liveEdit.mode === 'line' && liveEdit.ta && typeof liveEdit.ta.selectionStart === 'number') {
+            const s = liveEdit.ta.selectionStart
+            const e = liveEdit.ta.selectionEnd
+            if (s >= 0 && e >= 0) selRange = { start: Math.min(s, e), end: Math.max(s, e) }
+        } else {
+            const blk = target.closest('.blk[data-s]')
+            if (blk && e.currentTarget.contains(sel.anchorNode)) {
+                const a = nodeToSrcOffset(blk, sel.anchorNode, sel.anchorOffset)
+                const b = nodeToSrcOffset(blk, sel.focusNode, sel.focusOffset)
+                if (a >= 0 && b >= 0) selRange = { start: Math.min(a, b), end: Math.max(a, b) }
+            }
         }
     }
     const headings = [1, 2, 3, 4, 5, 6].map((n) => ({
@@ -5619,7 +5839,6 @@ els.titleRefreshBtn.addEventListener('click', refresh)
 els.searchBtn.addEventListener('click', openQuickSwitcher)
 els.newFileBtn.addEventListener('click', () => state.rootPath && createNewFile(state.rootPath))
 els.newFolderBtn.addEventListener('click', () => state.rootPath && createNewFolder(state.rootPath))
-els.saveBtn.addEventListener('click', saveFile)
 els.backBtn.addEventListener('click', goBack)
 els.forwardBtn.addEventListener('click', goForward)
 els.toggleSidebarBtn.addEventListener('click', toggleSidebar)

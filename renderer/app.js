@@ -1713,7 +1713,8 @@ function createRichLineEditor(srcLine) {
         el.focus()
     }
 
-    // 点击样式化文本 → 暴露修饰符（**text** / ~~text~~ / *text* / ==text==），光标落在修饰符之间。
+    // 点击样式化文本 → 暴露修饰符（**text** / ~~text~~ / *text* / ==text==）。
+    // 光标落在"实际点击的字符位置"（而不是固定在文本开头），展开后无需再点一次。
     // 修饰符是"收放式"的：光标离开该文本（点其它位置 / 方向键移出 / 展开另一处）→ 自动收拢回渲染态。
     const revealed = new Set()   // 当前被展开为原始文本的节点（元素被替换后的文本节点）
 
@@ -1730,16 +1731,43 @@ function createRichLineEditor(srcLine) {
         } catch { /* noop */ }
         el.focus()
     }
-    // 把样式元素替换为带修饰符的原始文本
-    const revealNode = (node) => {
+    // 点击位置在样式文本内的渲染偏移（mousedown 已把光标落位；合成事件用坐标兜底）
+    const clickRelIn = (node, x, y) => {
+        let rel = 0
+        try {
+            const cp = document.caretPositionFromPoint(x, y)
+            if (cp && cp.offsetNode && (cp.offsetNode === node || node.contains(cp.offsetNode))
+                && cp.offsetNode.nodeType === 3) {
+                rel = cp.offset
+            }
+        } catch { rel = 0 }
+        if (!rel) {
+            const sel = window.getSelection()
+            if (sel && sel.rangeCount) {
+                const range = sel.getRangeAt(0)
+                if (node.contains(range.startContainer)) {
+                    try {
+                        const pre = document.createRange()
+                        pre.setStart(node, 0)
+                        pre.setEnd(range.startContainer, range.startOffset)
+                        rel = pre.toString().length
+                    } catch { rel = 0 }
+                }
+            }
+        }
+        return rel
+    }
+    // 把样式元素替换为带修饰符的原始文本；rel = 点击处在该文本内的字符偏移
+    const revealNode = (node, rel) => {
         const mk = node.getAttribute('data-mk')
-        const raw = document.createTextNode(mk + node.textContent + mk)
+        const text = node.textContent
+        const raw = document.createTextNode(mk + text + mk)
         node.parentNode.replaceChild(raw, node)
         revealed.add(raw)
-        placeCaret(raw, mk.length)
+        const r = Math.max(0, Math.min(text.length, rel || 0))
+        placeCaret(raw, mk.length + r)
         updateLineStatus()
     }
-    // 光标当前所在的样式元素（收拢重渲染后重新定位用）
     el.addEventListener('click', (e) => {
         const t = e.target
         if (!t || t.nodeType !== 1) return
@@ -1747,6 +1775,7 @@ function createRichLineEditor(srcLine) {
         if (mk && /^(STRONG|DEL|EM|MARK)$/.test(t.tagName)) {
             e.preventDefault()
             e.stopPropagation()
+            const rel = clickRelIn(t, e.clientX, e.clientY)
             if (revealed.size) {
                 // 收拢其它已展开项：把它们的原始文本节点局部还原为渲染态
                 // （不整体重渲染，避免行宽变化导致点击元素失效）
@@ -1760,7 +1789,7 @@ function createRichLineEditor(srcLine) {
                     revealed.delete(node)
                 }
             }
-            revealNode(t)
+            revealNode(t, rel)
         }
     })
 

@@ -1634,7 +1634,7 @@ function richSrcToPoint(el, srcOffset) {
     const walk = (node) => {
         if (node.nodeType === 3) {
             const len = node.data.length
-            if (srcOffset <= src + len) return { node, off: srcOffset - src }
+            if (srcOffset <= src + len) return { node, off: Math.max(0, srcOffset - src) }
             src += len
             return null
         }
@@ -1701,17 +1701,45 @@ function createRichLineEditor(srcLine) {
     el.setSelectionRange = (start, end) => {
         const pt = richSrcToPoint(el, end == null ? start : end)
         try {
-            const r = document.createRange()
-            if (pt) { r.setStart(pt.node, pt.off); r.setEnd(pt.node, pt.off) }
-            else { r.selectNodeContents(el); r.collapse(false) }
-            const sel = window.getSelection()
-            sel.removeAllRanges()
-            sel.addRange(r)
+            if (pt && pt.node.isConnected) {
+                const r = document.createRange()
+                r.setStart(pt.node, pt.off)
+                r.setEnd(pt.node, pt.off)
+                const sel = window.getSelection()
+                sel.removeAllRanges()
+                sel.addRange(r)
+            }
         } catch { /* 定位失败时保持现状 */ }
         el.focus()
     }
 
-    // 点击样式化文本 → 暴露修饰符（**text** / ~~text~~ / *text* / ==text==），光标落在修饰符之间
+    // 点击样式化文本 → 暴露修饰符（**text** / ~~text~~ / *text* / ==text==），光标落在修饰符之间。
+    // 修饰符是"收放式"的：光标离开该文本（点其它位置 / 方向键移出 / 展开另一处）→ 自动收拢回渲染态。
+    const revealed = new Set()   // 当前被展开为原始文本的节点（元素被替换后的文本节点）
+
+    const placeCaret = (node, offset) => {
+        try {
+            if (node.isConnected) {
+                const r = document.createRange()
+                r.setStart(node, offset)
+                r.setEnd(node, offset)
+                const sel = window.getSelection()
+                sel.removeAllRanges()
+                sel.addRange(r)
+            }
+        } catch { /* noop */ }
+        el.focus()
+    }
+    // 把样式元素替换为带修饰符的原始文本
+    const revealNode = (node) => {
+        const mk = node.getAttribute('data-mk')
+        const raw = document.createTextNode(mk + node.textContent + mk)
+        node.parentNode.replaceChild(raw, node)
+        revealed.add(raw)
+        placeCaret(raw, mk.length)
+        updateLineStatus()
+    }
+    // 光标当前所在的样式元素（收拢重渲染后重新定位用）
     el.addEventListener('click', (e) => {
         const t = e.target
         if (!t || t.nodeType !== 1) return
@@ -1719,21 +1747,45 @@ function createRichLineEditor(srcLine) {
         if (mk && /^(STRONG|DEL|EM|MARK)$/.test(t.tagName)) {
             e.preventDefault()
             e.stopPropagation()
-            const text = t.textContent
-            const node = document.createTextNode(mk + text + mk)
-            t.parentNode.replaceChild(node, t)
-            try {
-                const r = document.createRange()
-                r.setStart(node, mk.length)
-                r.setEnd(node, mk.length)
-                const sel = window.getSelection()
-                sel.removeAllRanges()
-                sel.addRange(r)
-            } catch { /* noop */ }
-            el.focus()
-            updateLineStatus()
+            if (revealed.size) {
+                // 收拢其它已展开项：把它们的原始文本节点局部还原为渲染态
+                // （不整体重渲染，避免行宽变化导致点击元素失效）
+                for (const node of [...revealed]) {
+                    if (!node.parentNode) { revealed.delete(node); continue }
+                    const holder = document.createElement('span')
+                    holder.innerHTML = lineToRichHtml(node.data)
+                    node.parentNode.replaceChild(holder, node)
+                    while (holder.firstChild) holder.parentNode.insertBefore(holder.firstChild, holder)
+                    holder.remove()
+                    revealed.delete(node)
+                }
+            }
+            revealNode(t)
         }
     })
+
+    // 光标离开已展开文本 → 收拢：序列化当前值 → 重新富文本渲染 → 按源偏移恢复光标
+    el._maybeCollapse = () => {
+        if (!revealed.size) return
+        const sel = window.getSelection()
+        let inside = false
+        if (sel && sel.rangeCount) {
+            const range = sel.getRangeAt(0)
+            for (const node of revealed) {
+                if (!node.parentNode) { revealed.delete(node); continue }
+                const inStart = range.startContainer === node && range.startOffset >= 0 && range.startOffset <= node.data.length
+                const inEnd = range.endContainer === node && range.endOffset >= 0 && range.endOffset <= node.data.length
+                if (inStart || inEnd) { inside = true; break }
+            }
+        }
+        if (inside) return
+        const caret = el.selectionStart            // 收拢前光标源偏移
+        el.value = richLineValue(el)               // 重渲染：修饰符隐藏、恢复渲染态
+        revealed.clear()
+        el.setSelectionRange(caret, caret)
+    }
+    el.addEventListener('keyup', () => el._maybeCollapse())
+    el.addEventListener('input', () => { updateLineStatus(); el._maybeCollapse() })
 
     // 粘贴只插纯文本（不引入富文本/换行）
     el.addEventListener('paste', (e) => {
@@ -1743,11 +1795,15 @@ function createRichLineEditor(srcLine) {
         document.execCommand('insertText', false, text.replace(/\r?\n/g, ' '))
     })
 
-    // 输入时同步状态栏（行/列/最后光标源偏移）
-    el.addEventListener('input', () => updateLineStatus())
-
+    richEditorActive = el
     return el
 }
+
+// 当前富文本行编辑器（document 级 selectionchange 用它判断光标是否离开已展开修饰符）
+let richEditorActive = null
+document.addEventListener('selectionchange', () => {
+    if (richEditorActive && richEditorActive._maybeCollapse) richEditorActive._maybeCollapse()
+})
 
 // 打开指定行编辑（点击 / 回车前进共用）；caret 为行内源偏移（-1 = 行尾）
 function openRowEditor(blk, rowEl, lineNo, caret) {
@@ -1758,6 +1814,18 @@ function openRowEditor(blk, rowEl, lineNo, caret) {
     const lines = f.content.split('\n')
     if (lineNo < 0 || lineNo >= lines.length) return
     const ta = createRichLineEditor(lines[lineNo])
+    // 软换行段落（span.md-line 之间由 <br> 分隔）：块级行编辑器会让相邻 <br>
+    // 产生多余空行（上方文本与下方链接行之间出现空隙）。编辑期间移除相邻
+    // <br> 与空白文本节点，提交/取消时整块重渲染会自动恢复。
+    if (rowEl.tagName !== 'HR') {
+        const isSeparator = (n) =>
+            (n && n.nodeType === 1 && n.tagName === 'BR') ||
+            (n && n.nodeType === 3 && /^[\n\r\t ]*$/.test(n.data))
+        let sib = rowEl.previousSibling
+        while (sib && isSeparator(sib)) { const t = sib; sib = sib.previousSibling; t.remove() }
+        sib = rowEl.nextSibling
+        while (sib && isSeparator(sib)) { const t = sib; sib = sib.nextSibling; t.remove() }
+    }
     // 分割线（hr）是自闭合元素，无子节点可替换 → 直接替换元素本身
     if (rowEl.tagName === 'HR') {
         rowEl.parentNode.replaceChild(ta, rowEl)

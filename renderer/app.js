@@ -1373,7 +1373,749 @@ function updateFileTypeBadge(paneIndex) {
     P.typeBadge.className = cls
 }
 
-// 按面板渲染所见即所得编辑器
+// ================================================================
+// 整文档实时编辑（Obsidian 式）：整个文件是一个可编辑整体。
+// 跨行选择 / 复制 / 粘贴 / 剪切全部原生可用；行内修饰符按光标显隐；
+// DOM 变化（输入/删除/粘贴）由序列化器无损还原为 Markdown 源码；
+// 回车拆分 / 行首退格合并 / 表格行等"行语义"操作仍按源行处理。
+// ================================================================
+let docRevealed = new Set()   // 当前展开为原始修饰符文本的节点
+let docSaveTimer = null       // 防抖序列化（DOM → 源）
+
+// —— 渲染后准备：contenteditable + data-mk（每次渲染）+ 事件（每面板一次）——
+function prepareDocEditor(liveEditorEl) {
+    if (!liveEditorEl) return
+    if (!liveEditorEl._docReady) {
+        liveEditorEl._docReady = true
+        const paneIdx = liveEditorEl.closest('.pane') ? Number(liveEditorEl.closest('.pane').dataset.pane) : 0
+        liveEditorEl.addEventListener('keydown', (e) => onDocKeydown(e, paneIdx))
+        liveEditorEl.addEventListener('input', () => onDocInput(paneIdx))
+        liveEditorEl.addEventListener('paste', onDocPaste)
+        liveEditorEl.addEventListener('click', onDocClick)
+    }
+    // 每次重渲染 md-body 都是新元素：重新挂 contenteditable 与 data-mk
+    const body = liveEditorEl.querySelector('.md-body')
+    if (!body) return
+    body.contentEditable = 'true'
+    body.spellcheck = false
+    body.querySelectorAll('strong, del, em, mark').forEach((n) => {
+        if (n.getAttribute('data-mk')) return
+        const tag = n.tagName.toLowerCase()
+        n.setAttribute('data-mk', tag === 'strong' ? '**' : tag === 'del' ? '~~' : tag === 'em' ? '*' : '==')
+    })
+}
+
+// 文本节点 → 源文本（去掉解析器在 <br> 旁输出的排版换行 \n）
+function textNodeEff(n) {
+    let s = n.data
+    const prev = n.previousSibling
+    const next = n.nextSibling
+    if (prev && prev.nodeType === 1 && prev.tagName === 'BR' && s.startsWith('\n')) s = s.slice(1)
+    if (next && next.nodeType === 1 && next.tagName === 'BR' && s.endsWith('\n')) s = s.slice(0, -1)
+    return s
+}
+
+// —— 内联序列化（单节点）——
+function inlineNodeValue(n) {
+    if (n.nodeType === 3) {
+        const s = textNodeEff(n)
+        // 纯空白文本节点：解析器在元素间输出的排版换行，不写入源
+        return /^[\n\r\t ]*$/.test(s) ? '' : s
+    }
+    if (n.nodeType !== 1) return ''
+    const tag = n.tagName.toLowerCase()
+    if (tag === 'br') return '\n'
+    if (tag === 'strong' || tag === 'del' || tag === 'em' || tag === 'mark') {
+        const mk = n.getAttribute('data-mk') || ''
+        return mk + n.textContent + mk
+    }
+    if (tag === 'code') return '`' + n.textContent + '`'
+    if (tag === 'a') {
+        if (n.classList && n.classList.contains('wikilink')) return '[[' + (n.getAttribute('data-target') || n.textContent) + ']]'
+        return '[' + n.textContent + '](' + (n.getAttribute('href') || '') + ')'
+    }
+    if (tag === 'img') return '![' + (n.getAttribute('alt') || '') + '](' + (n.getAttribute('src') || '') + ')'
+    let out = ''
+    for (const c of n.childNodes) out += inlineNodeValue(c)
+    return out
+}
+function inlineSerialize(node) {
+    let out = ''
+    for (const c of node.childNodes) out += inlineNodeValue(c)
+    return out
+}
+
+// —— 块级序列化（返回源行数组）——
+function serializeBlock(blk) {
+    const first = blk.querySelector(':scope > *')
+    if (!first) return ['']
+    const tag = first.tagName
+    if (/^H[1-6]$/.test(tag)) return ['#'.repeat(+tag[1]) + ' ' + inlineSerialize(first)]
+    if (tag === 'P') {
+        if (first.classList.contains('md-empty')) return ['']
+        return inlineSerialize(first).split('\n')
+    }
+    if (tag === 'HR') return ['---']
+    if (tag === 'PRE') {
+        const code = first.querySelector('code') || first
+        const lang = first.querySelector('code[data-lang]') ? first.querySelector('code[data-lang]').getAttribute('data-lang') : ''
+        const inner = (code.textContent || '').split('\n')
+        return ['```' + lang, ...inner, '```']
+    }
+    if (tag === 'UL' || tag === 'OL') return serializeList(first)
+    if (tag === 'BLOCKQUOTE') return serializeBlockquote(first)
+    if (tag === 'TABLE') return serializeTable(first)
+    return [inlineSerialize(first)]
+}
+function serializeList(list) {
+    const lines = []
+    const walk = (ul, depth) => {
+        const ordered = ul.tagName === 'OL'
+        let idx = 1
+        for (const li of ul.children) {
+            if (li.tagName !== 'LI') continue
+            const marker = ordered ? idx + '. ' : '- '
+            const indent = '  '.repeat(depth)
+            let content = inlineSerialize(li)
+            const childList = li.querySelector(':scope > ul, :scope > ol')
+            if (childList) {
+                // 排除子列表文本（子列表单独序列化）
+                content = inlineSerializeExcluding(li, 'list')
+            }
+            const cb = li.querySelector(':scope input[type=checkbox]')
+            const task = cb ? (cb.checked ? '[x] ' : '[ ] ') : ''
+            lines.push(indent + marker + task + content)
+            const child = li.querySelector(':scope > ul, :scope > ol')
+            if (child) walk(child, depth + 1)
+            idx++
+        }
+    }
+    walk(list, 0)
+    return lines
+}
+function inlineSerializeExcluding(node, kind) {
+    let out = ''
+    const walk = (n) => {
+        if (n.nodeType === 3) { const s = textNodeEff(n); if (!/^[\n\r\t ]*$/.test(s)) out += s; return }
+        if (n.nodeType !== 1) return
+        const tag = n.tagName.toLowerCase()
+        if (kind === 'list' && (tag === 'ul' || tag === 'ol')) return
+        if (tag === 'br') { out += '\n'; return }
+        if (tag === 'strong' || tag === 'del' || tag === 'em' || tag === 'mark') {
+            const mk = n.getAttribute('data-mk') || ''
+            out += mk
+            for (const c of n.childNodes) walk(c)
+            out += mk
+            return
+        }
+        if (tag === 'code') { out += '`' + n.textContent + '`'; return }
+        if (tag === 'a') {
+            if (n.classList && n.classList.contains('wikilink')) { out += '[[' + (n.getAttribute('data-target') || n.textContent) + ']]'; return }
+            out += '[' + n.textContent + '](' + (n.getAttribute('href') || '') + ')'
+            return
+        }
+        for (const c of n.childNodes) walk(c)
+    }
+    for (const c of node.childNodes) walk(c)
+    return out
+}
+function serializeBlockquote(bq) {
+    const inner = []
+    for (const child of bq.children) {
+        const tag = child.tagName
+        if (/^H[1-6]$/.test(tag)) inner.push('#'.repeat(+tag[1]) + ' ' + inlineSerialize(child))
+        else if (tag === 'P') inner.push(...inlineSerialize(child).split('\n'))
+        else if (tag === 'UL' || tag === 'OL') inner.push(...serializeList(child))
+        else if (tag === 'BLOCKQUOTE') inner.push(...serializeBlockquote(child))
+        else if (tag === 'PRE') {
+            const code = child.querySelector('code') || child
+            const lang = child.querySelector('code[data-lang]') ? child.querySelector('code[data-lang]').getAttribute('data-lang') : ''
+            inner.push('```' + lang, ...(code.textContent || '').split('\n'), '```')
+        }
+        else inner.push(inlineSerialize(child))
+    }
+    return inner.map((l) => '> ' + l)
+}
+function serializeTable(table) {
+    const lines = []
+    const header = [...table.querySelectorAll('thead th')].map((c) => inlineSerialize(c))
+    if (!header.length) return lines
+    lines.push('| ' + header.join(' | ') + ' |')
+    lines.push('| ' + header.map(() => '---').join(' | ') + ' |')
+    for (const tr of table.querySelectorAll('tbody tr')) {
+        const cells = [...tr.querySelectorAll('td')].map((c) => inlineSerialize(c))
+        lines.push('| ' + cells.join(' | ') + ' |')
+    }
+    return lines
+}
+
+// —— 整文档序列化（DOM → Markdown）——
+function docSerialize(body) {
+    const lines = []
+    for (const blk of body.children) {
+        if (blk.classList && blk.classList.contains('blk')) {
+            lines.push(...serializeBlock(blk))
+        } else {
+            const s = inlineSerialize(blk).replace(/\n+$/, '')
+            if (s) lines.push(...s.split('\n'))
+        }
+    }
+    const text = lines.join('\n')
+    return text.endsWith('\n') ? text : text + '\n'
+}
+
+// —— DOM 光标 → 源偏移/行/列 ——
+function docCaretInfo(paneIdx) {
+    const P = paneEls(paneIdx)
+    const body = P.liveEditor.querySelector('.md-body')
+    if (!body) return null
+    const sel = window.getSelection()
+    if (!sel || !sel.rangeCount) return null
+    const range = sel.getRangeAt(0)
+    if (!body.contains(range.startContainer)) return null
+    const before = docTextUpTo(body, range.startContainer, range.startOffset)
+    const nl = before.lastIndexOf('\n')
+    return { line: before.split('\n').length - 1, col: before.length - nl - 1, offset: before.length }
+}
+
+// 序列化到光标处（块级 + 前缀一致）
+function docTextUpTo(body, node, offset) {
+    const el = node.nodeType === 1 ? node : node.parentNode
+    const blk = el && el.closest ? el.closest('.blk[data-s]') : null
+    if (!blk) return ''
+    let out = ''
+    for (const b of body.children) {
+        if (b === blk) {
+            out += blockTextUpTo(b, node, offset)
+            break
+        }
+        out += serializeBlock(b).join('\n') + '\n'
+    }
+    return out
+}
+function blockTextUpTo(blk, node, offset) {
+    const first = blk.querySelector(':scope > *')
+    if (!first) return ''
+    const tag = first.tagName
+    if (/^H[1-6]$/.test(tag)) return '#'.repeat(+tag[1]) + ' ' + inlineUpTo(first, node, offset)
+    if (tag === 'P') return first.classList.contains('md-empty') ? '' : inlineUpTo(first, node, offset)
+    if (tag === 'HR') return '---'
+    if (tag === 'PRE') {
+        const code = first.querySelector('code') || first
+        if (!code.contains(node)) return '```' + langOf(first) + '\n' + code.textContent
+        return '```' + langOf(first) + '\n' + textBefore(code, node, offset)
+    }
+    if (tag === 'UL' || tag === 'OL') return listTextUpTo(first, node, offset)
+    if (tag === 'BLOCKQUOTE') return '> ' + (blockTextUpTo(first, node, offset) || '')
+    if (tag === 'TABLE') return tableTextUpTo(first, node, offset)
+    return inlineUpTo(first, node, offset)
+}
+function langOf(pre) {
+    const c = pre.querySelector('code[data-lang]')
+    return c ? c.getAttribute('data-lang') : ''
+}
+function textBefore(container, node, offset) {
+    let out = ''
+    const walk = (n) => {
+        if (n === node) {
+            if (n.nodeType === 3) {
+                const eff = textNodeEff(n)
+                const lead = n.data.length - eff.length
+                out += eff.slice(0, Math.max(0, Math.min(offset - lead, eff.length)))
+            }
+            return false
+        }
+        if (n.nodeType === 3) { const s = textNodeEff(n); if (!/^[\n\r\t ]*$/.test(s)) out += s; return true }
+        if (n.nodeType !== 1) return true
+        for (const c of n.childNodes) { if (!walk(c)) return false }
+        return true
+    }
+    walk(container)
+    return out
+}
+function inlineUpTo(container, stopNode, stopOffset) {
+    let out = ''
+    let done = false
+    const walk = (n) => {
+        if (done) return
+        if (n === stopNode) {
+            done = true
+            if (n.nodeType === 3) {
+                const eff = textNodeEff(n)
+                const lead = n.data.length - eff.length
+                const off = Math.max(0, Math.min(stopOffset - lead, eff.length))
+                out += eff.slice(0, off)
+            } else if (n.nodeType === 1) {
+                for (let i = 0; i < stopOffset && i < n.childNodes.length; i++) walk(n.childNodes[i])
+            }
+            return
+        }
+        if (n.nodeType === 3) { const s = textNodeEff(n); if (!/^[\n\r\t ]*$/.test(s)) out += s; return }
+        if (n.nodeType !== 1) return
+        const tag = n.tagName.toLowerCase()
+        if (tag === 'br') { out += '\n'; return }
+        if (n.contains(stopNode)) {
+            if (tag === 'strong' || tag === 'del' || tag === 'em' || tag === 'mark') {
+                const mk = n.getAttribute('data-mk') || ''
+                out += mk
+                for (const c of n.childNodes) { if (done) break; walk(c) }
+                if (!done) out += mk
+                return
+            }
+            for (const c of n.childNodes) { if (done) break; walk(c) }
+            return
+        }
+        out += inlineNodeValue(n)
+    }
+    for (const c of container.childNodes) walk(c)
+    return out
+}
+function listTextUpTo(list, node, offset) {
+    let out = ''
+    let depth = 0
+    const find = (ul) => {
+        const ordered = ul.tagName === 'OL'
+        let idx = 1
+        for (const li of ul.children) {
+            if (li.tagName !== 'LI') continue
+            const marker = ordered ? idx + '. ' : '- '
+            const indent = '  '.repeat(depth)
+            if (li.contains(node)) {
+                const cb = li.querySelector(':scope input[type=checkbox]')
+                const task = cb ? (cb.checked ? '[x] ' : '[ ] ') : ''
+                const upTo = inlineUpTo(li, node, offset).split('\n')
+                const firstLine = (upTo[0] || '').trimEnd()
+                out += indent + marker + task + firstLine
+                if (upTo.length > 1) out += '\n' + upTo.slice(1).join('\n')
+                return true
+            }
+            out += indent + marker + inlineSerialize(li).split('\n')[0] + '\n'
+            const child = li.querySelector(':scope > ul, :scope > ol')
+            if (child) { depth++; if (find(child)) return true; depth-- }
+            idx++
+        }
+        return false
+    }
+    find(list)
+    return out
+}
+function tableTextUpTo(table, node, offset) {
+    let out = ''
+    let first = true
+    const trs = [...table.querySelectorAll('thead tr, tbody tr')]
+    for (const tr of trs) {
+        const cells = [...tr.querySelectorAll('th, td')]
+        if (tr.closest('thead') && first) {
+            out += '| ' + cells.map((c) => (c.contains(node) ? inlineUpTo(c, node, offset) : inlineSerialize(c))).join(' | ') + ' |'
+            first = false
+        } else if (tr.closest('tbody')) {
+            if (out) out += '\n'
+            out += '| ' + cells.map((c) => (c.contains(node) ? inlineUpTo(c, node, offset) : inlineSerialize(c))).join(' | ') + ' |'
+        }
+    }
+    return out
+}
+
+// —— 源偏移 → DOM 光标（用于回车拆分/退格合并后的光标恢复）——
+function docPointFromSrc(body, offset) {
+    let remaining = offset
+    const blocks = [...body.querySelectorAll(':scope > .blk[data-s]')]
+    for (let bi = 0; bi < blocks.length; bi++) {
+        const blk = blocks[bi]
+        const src = serializeBlock(blk).join('\n')
+        const sep = bi < blocks.length - 1 ? 1 : 0
+        if (remaining <= src.length + sep || bi === blocks.length - 1) {
+            const inner = Math.max(0, Math.min(remaining, src.length))
+            return pointInBlock(blk, inner)
+        }
+        remaining -= src.length + sep
+    }
+    return null
+}
+function pointInBlock(blk, inner) {
+    const first = blk.querySelector(':scope > *')
+    if (!first) return null
+    const tag = first.tagName
+    if (/^H[1-6]$/.test(tag)) {
+        const pre = '#'.repeat(+tag[1]) + ' '
+        return inlinePointAt(first, 0, Math.max(0, inner - pre.length)) || { node: first, off: 0 }
+    }
+    if (tag === 'P') return inlinePointAt(first, 0, inner) || { node: first, off: 0 }
+    if (tag === 'UL' || tag === 'OL') return listPointAt(first, inner)
+    if (tag === 'BLOCKQUOTE') return inlinePointAt(first, 0, Math.max(0, inner - 2)) || { node: first, off: 0 }
+    if (tag === 'TABLE') return tablePointAt(first, inner)
+    if (tag === 'PRE') {
+        const code = first.querySelector('code') || first
+        const text = code.textContent || ''
+        const off = Math.max(0, Math.min(inner, text.length))
+        const t = document.createTreeWalker(code, NodeFilter.SHOW_TEXT)
+        let acc = 0
+        let tn = t.nextNode()
+        while (tn) {
+            if (acc + tn.data.length >= off) return { node: tn, off: Math.max(0, off - acc) }
+            acc += tn.data.length
+            tn = t.nextNode()
+        }
+        return null
+    }
+    return { node: first, off: 0 }
+}
+function inlinePointAt(container, lineIndex, col) {
+    let line = 0
+    let pos = 0
+    let result = null
+    const walk = (n) => {
+        if (result) return
+        if (n.nodeType === 3) {
+            const eff = textNodeEff(n)
+            const lead = n.data.length - eff.length
+            const len = eff.length
+            if (line === lineIndex && col >= pos && col <= pos + len) {
+                result = { node: n, off: Math.max(0, col - pos) + lead }
+                return
+            }
+            pos += len
+            return
+        }
+        if (n.nodeType !== 1) return
+        const tag = n.tagName.toLowerCase()
+        if (tag === 'br') { line++; return }
+        if (tag === 'strong' || tag === 'del' || tag === 'em' || tag === 'mark') {
+            const mk = n.getAttribute('data-mk') || ''
+            pos += mk.length
+            for (const c of n.childNodes) walk(c)
+            if (!result) pos += mk.length
+            return
+        }
+        for (const c of n.childNodes) walk(c)
+    }
+    for (const c of container.childNodes) walk(c)
+    return result
+}
+function listPointAt(list, inner) {
+    let remaining = inner
+    let depth = 0
+    let result = null
+    const find = (ul) => {
+        if (result) return
+        const ordered = ul.tagName === 'OL'
+        let idx = 1
+        for (const li of ul.children) {
+            if (li.tagName !== 'LI') continue
+            const marker = ordered ? (idx + '. ').length : 2
+            const indent = 2 * depth
+            const lineLen = indent + marker + (li.querySelector(':scope input[type=checkbox]') ? 4 : 0)
+            const child = li.querySelector(':scope > ul, :scope > ol')
+            const childLen = child ? inlineSerialize(child).split('\n').reduce((a, l) => a + l.length + 1, 0) : 0
+            const itemLen = lineLen + inlineSerializeExcluding(li, 'list').length
+            if (remaining <= itemLen) {
+                const rel = Math.max(0, remaining - lineLen)
+                result = inlinePointAt(li, 0, rel) || { node: li, off: 0 }
+                return
+            }
+            remaining -= itemLen
+            if (child) { depth++; find(child); depth-- }
+            idx++
+        }
+    }
+    find(list)
+    return result
+}
+function tablePointAt(table, inner) {
+    // 简化：定位到包含 inner 的行单元格
+    const trs = [...table.querySelectorAll('thead tr, tbody tr')]
+    let acc = 0
+    for (const tr of trs) {
+        const cells = [...tr.querySelectorAll('th, td')]
+        const header = tr.closest('thead')
+        const rowSrc = '| ' + cells.map(() => 'x').join(' | ') + ' |'
+        if (inner <= acc + rowSrc.length) {
+            const rel = Math.max(0, inner - acc)
+            const cellIdx = Math.min(cells.length - 1, Math.floor(rel / 5))
+            const cell = cells[cellIdx]
+            return { node: cell.firstChild || cell, off: 0 }
+        }
+        acc += rowSrc.length + 1
+    }
+    return null
+}
+
+// —— 事件处理 ——
+function onDocKeydown(e, paneIdx) {
+    const t = e.target
+    if (!t || !t.closest || !t.closest('.md-body')) return
+    if (e.key === 'Enter') {
+        if (!e.shiftKey) { e.preventDefault(); docEnter(paneIdx) }
+        return
+    }
+    if (e.key === 'Backspace') {
+        const info = docCaretInfo(paneIdx)
+        if (info && info.col === 0) {
+            e.preventDefault()
+            docBackspace(paneIdx)
+        }
+        return
+    }
+    if (e.key === 'Tab') { e.preventDefault(); return }
+}
+function onDocInput(paneIdx) {
+    const P = paneEls(paneIdx)
+    const body = P.liveEditor.querySelector('.md-body')
+    if (!body) return
+    const tab = state.tabs.find((t) => t.id === state.panes[paneIdx].tabId)
+    if (!tab) return
+    clearTimeout(docSaveTimer)
+    docSaveTimer = setTimeout(() => {
+        if (!body.isConnected) return
+        tab.content = docSerialize(body)
+        updateSaveStatus(paneIdx)
+        renderTabs()
+        if (paneIdx === state.activePane) renderOutline()
+        updateDocStatus(paneIdx)
+    }, 350)
+}
+function onDocPaste(e) {
+    const t = e.target
+    if (!t || !t.closest || !t.closest('.md-body')) return
+    e.preventDefault()
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain')
+    if (!text) return
+    // 多行粘贴：逐行插入，用 <br> 分隔（序列化时 br → \n）
+    const lines = text.replace(/\r\n/g, '\n').split('\n')
+    const first = lines.shift()
+    if (first) document.execCommand('insertText', false, first)
+    for (const ln of lines) {
+        document.execCommand('insertHTML', false, '<br>' + escapeHtml(ln))
+    }
+    onDocInput(curPaneIdx())
+}
+function onDocClick(e) {
+    const t = e.target
+    if (!t || t.nodeType !== 1) return
+    const mk = t.getAttribute && t.getAttribute('data-mk')
+    if (mk && /^(STRONG|DEL|EM|MARK)$/.test(t.tagName)) {
+        e.preventDefault()
+        const raw = document.createTextNode(mk + t.textContent + mk)
+        t.parentNode.replaceChild(raw, t)
+        docRevealed.add(raw)
+        collapseDocRevealed(raw)
+        try {
+            const r = document.createRange()
+            r.setStart(raw, mk.length); r.setEnd(raw, mk.length)
+            const sel = window.getSelection()
+            sel.removeAllRanges(); sel.addRange(r)
+        } catch { /* noop */ }
+        updateDocStatus(curPaneIdx())
+    }
+}
+function collapseDocRevealed(keep) {
+    for (const node of [...docRevealed]) {
+        if (node === keep) continue                       // 当前展开项保留
+        if (!node.parentNode) { docRevealed.delete(node); continue }
+        const holder = document.createElement('span')
+        holder.innerHTML = lineToRichHtml(node.data)
+        node.parentNode.replaceChild(holder, node)
+        while (holder.firstChild) holder.parentNode.insertBefore(holder.firstChild, holder)
+        holder.remove()
+        docRevealed.delete(node)
+    }
+}
+document.addEventListener('selectionchange', () => {
+    const P = curPaneEls()
+    const body = P.liveEditor ? P.liveEditor.querySelector('.md-body') : null
+    if (!body) return
+    // 光标在整文档编辑区 → 刷新状态栏行/列
+    const sel = window.getSelection()
+    if (sel && sel.rangeCount && body.contains(sel.getRangeAt(0).startContainer) && document.activeElement === body) {
+        updateDocStatus(curPaneIdx())
+    }
+    if (!docRevealed.size) return
+    if (!sel || !sel.rangeCount) return
+    const range = sel.getRangeAt(0)
+    let inside = false
+    for (const node of docRevealed) {
+        if (!node.parentNode) { docRevealed.delete(node); continue }
+        if ((range.startContainer === node && range.startOffset >= 0 && range.startOffset <= node.data.length)
+            || (range.endContainer === node && range.endOffset >= 0 && range.endOffset <= node.data.length)) { inside = true; break }
+    }
+    if (!inside) collapseDocRevealed(null)
+})
+
+// 状态栏：整文档模式的光标行/列
+function updateDocStatus(paneIdx) {
+    const info = docCaretInfo(paneIdx)
+    if (!info) return
+    state.cursorLine = info.line + 1
+    state.cursorCol = info.col + 1
+    updateStatusBar()
+    const f = state.currentFile
+    if (f && typeof f.content === 'string') {
+        lastCaretPos = info.offset
+    }
+}
+function curPaneIdx() {
+    return state.activePane
+}
+
+// —— 回车（整文档）——
+function docEnter(paneIdx) {
+    const P = paneEls(paneIdx)
+    const body = P.liveEditor.querySelector('.md-body')
+    const f = state.currentFile
+    if (!body || !f) return
+    // 表格内回车 → 新增一行
+    const sel = window.getSelection()
+    if (sel.rangeCount) {
+        let sc = sel.getRangeAt(0).startContainer
+        if (sc.nodeType === 3) sc = sc.parentNode
+        if (sc && sc.closest && sc.closest('td, th')) {
+            docTableEnter(P, body)
+            return
+        }
+    }
+    f.content = docSerialize(body)
+    const info = docCaretInfo(paneIdx)
+    if (!info) return
+    const lines = f.content.split('\n')
+    const line = Math.max(0, Math.min(info.line, lines.length - 1))
+    pushEditUndo(f.path)
+    const res = enterSplit(lines, line, info.col)
+    if (!res) return
+    f.content = res.lines.join('\n')
+    updateSaveStatus(paneIdx)   // 触发自动保存
+    renderTabs()
+    const st = P.liveEditor.scrollTop
+    renderLiveEditor(paneIdx)
+    P.liveEditor.scrollTop = st
+    // 恢复光标：定位到新行行首 + 列
+    const body2 = P.liveEditor.querySelector('.md-body')
+    if (body2) docPlaceCaretAtLine(body2, res.newLineNo, res.newCaret)
+}
+// 在 (lineNo, col)（源坐标）放置光标
+function docPlaceCaretAtLine(body, lineNo, col) {
+    const blocks = [...body.querySelectorAll(':scope > .blk[data-s]')]
+    const blk = blocks.find((b) => parseInt(b.dataset.s, 10) <= lineNo && parseInt(b.dataset.e, 10) >= lineNo)
+    if (!blk) { body.focus(); return }
+    const blkLines = serializeBlock(blk)
+    const relLine = lineNo - parseInt(blk.dataset.s, 10)
+    if (relLine < 0 || relLine >= blkLines.length) { body.focus(); return }
+    const lineSrc = blkLines[relLine] || ''
+    const trimLen = lineSrc.length - lineSrc.trimStart().length
+    const targetCol = Math.max(trimLen, Math.min(col, lineSrc.length))
+    let inner = 0
+    for (let i = 0; i < relLine; i++) inner += blkLines[i].length + 1
+    inner += targetCol
+    const pt = pointInBlock(blk, inner)
+    if (pt && pt.node) {
+        try {
+            const r = document.createRange()
+            r.setStart(pt.node, pt.off); r.setEnd(pt.node, pt.off)
+            const s = window.getSelection()
+            s.removeAllRanges(); s.addRange(r)
+        } catch { /* noop */ }
+    }
+    body.focus()
+    updateDocStatus(Number(body.closest('.pane').dataset.pane) || 0)
+}
+
+// —— 回车拆分逻辑（源行操作；lineEditEnter 语义复用）——
+function enterSplit(lines, lineNo, caret) {
+    const curLine = lines[lineNo] || ''
+    const marker = /^(\s*)([-*+]|\d+\.)\s+/.exec(curLine)
+    const curIsBareMarker = marker && curLine.slice(marker[0].length) === ''
+    const nextNo = lineNo + 1
+    if (curIsBareMarker) {
+        lines[lineNo] = ''
+        return { lines, newLineNo: lineNo, newCaret: 0 }
+    }
+    if (caret > 0 && caret < curLine.length) {
+        const before = curLine.slice(0, caret)
+        const after = curLine.slice(caret)
+        if (marker && caret >= marker[0].length) {
+            let prefix = marker[1] + marker[2] + ' '
+            const num = /^(\d+)\.$/.exec(marker[2])
+            if (num) prefix = marker[1] + (parseInt(num[1], 10) + 1) + '. '
+            lines[lineNo] = before
+            lines.splice(nextNo, 0, prefix + after)
+            return { lines, newLineNo: nextNo, newCaret: prefix.length }
+        }
+        lines[lineNo] = before
+        lines.splice(nextNo, 0, after)
+        return { lines, newLineNo: nextNo, newCaret: 0 }
+    }
+    if (marker) {
+        const nextLine = lines[nextNo] || ''
+        const nextMarker = /^(\s*)([-*+]|\d+\.)\s+/.exec(nextLine)
+        const nextIsBareMarker = nextMarker && nextLine.slice(nextMarker[0].length) === ''
+        if (nextIsBareMarker) {
+            lines[nextNo] = ''
+            return { lines, newLineNo: nextNo, newCaret: 0 }
+        }
+        let prefix = marker[1] + marker[2] + ' '
+        const num = /^(\d+)\.$/.exec(marker[2])
+        if (num) prefix = marker[1] + (parseInt(num[1], 10) + 1) + '. '
+        lines.splice(nextNo, 0, prefix)
+        return { lines, newLineNo: nextNo, newCaret: prefix.length }
+    }
+    lines.splice(nextNo, 0, '')
+    return { lines, newLineNo: nextNo, newCaret: 0 }
+}
+
+// —— 行首退格合并（整文档）——
+function docBackspace(paneIdx) {
+    const P = paneEls(paneIdx)
+    const body = P.liveEditor.querySelector('.md-body')
+    const f = state.currentFile
+    if (!body || !f) return
+    f.content = docSerialize(body)
+    const info = docCaretInfo(paneIdx)
+    if (!info || info.line <= 0) return
+    const lines = f.content.split('\n')
+    const line = Math.max(0, Math.min(info.line, lines.length - 1))
+    const prevLen = (lines[line - 1] || '').length
+    pushEditUndo(f.path)
+    if ((lines[line] || '') === '') {
+        lines.splice(line, 1)
+    } else {
+        lines[line - 1] = (lines[line - 1] || '') + lines[line]
+        lines.splice(line, 1)
+    }
+    f.content = lines.join('\n')
+    updateSaveStatus(paneIdx)   // 触发自动保存
+    renderTabs()
+    const st = P.liveEditor.scrollTop
+    renderLiveEditor(paneIdx)
+    P.liveEditor.scrollTop = st
+    const body2 = P.liveEditor.querySelector('.md-body')
+    if (body2) docPlaceCaretAtLine(body2, Math.max(0, line - 1), prevLen)
+}
+
+// —— 表格内回车：新增一行（Obsidian 行为）——
+function docTableEnter(P, body) {
+    const sel = window.getSelection()
+    if (!sel.rangeCount) return
+    let n = sel.getRangeAt(0).startContainer
+    if (n.nodeType === 3) n = n.parentNode
+    const td = n.closest ? n.closest('td, th') : null
+    const tr = td ? td.closest('tr') : null
+    if (!tr || !tr.parentNode) return
+    const count = tr.children.length
+    const newTr = document.createElement('tr')
+    for (let i = 0; i < count; i++) {
+        const cell = document.createElement('td')
+        cell.innerHTML = '<br>'   // 空单元格占位，可点击输入
+        newTr.appendChild(cell)
+    }
+    tr.parentNode.insertBefore(newTr, tr.nextSibling)
+    const firstCell = newTr.querySelector('td')
+    if (firstCell) {
+        const r = document.createRange()
+        r.setStart(firstCell, 0); r.setEnd(firstCell, 0)
+        const s = window.getSelection()
+        s.removeAllRanges(); s.addRange(r)
+    }
+    onDocInput(Number(P.liveEditor.closest('.pane').dataset.pane) || 0)
+}
 function renderLiveEditor(paneIndex) {
     // 任何重渲染前先提交未完成的行编辑（切换面板 / 切换文件 / 切视图时避免内容丢失）。
     // commitLineEdit 内部会置 liveEdit=null 再调本函数 → 不会递归。
@@ -1386,6 +2128,7 @@ function renderLiveEditor(paneIndex) {
     if (!f || !isMarkdown(f.name)) return
     P.liveEditor.innerHTML = previewHtmlFor(f.path, f.content)
     highlightPreviewBlocks()
+    prepareDocEditor(P.liveEditor)   // 整文档实时编辑：contenteditable + data-mk + 事件
     liveEdit = null   // 重渲染后行编辑器失效
 }
 
@@ -1398,38 +2141,21 @@ function renderLiveEditor(paneIndex) {
 function handleLiveEditorMouseDown(e) {
     const t = e.target
     if (!t || !t.closest) return
-    if (t.closest('.line-inline')) return                              // 行编辑器内部（移动光标）
-    if (t.closest('input[type=checkbox], a[href]')) return             // 勾选框/普通链接交回 click
-    // wikilink：普通点击 = 进入行编辑（可编辑 [[...]] 源码）；Ctrl/Cmd+点击 = 跳转（交回 click）
+    if (t.closest('.line-inline')) return                              // 旧行编辑器残留（内部移动光标）
+    if (t.closest('input[type=checkbox]')) return                      // 勾选框交回 click
+    if (t.closest('a[href]')) return                                   // 链接交回 click
+    // wikilink：Ctrl/Cmd+点击 = 跳转（交回 click）；普通点击 = 就地编辑（整文档可编辑，无需拦截）
     if (t.closest('.wikilink') && (e.ctrlKey || e.metaKey)) return
-    if (liveEdit) commitLineEdit()                                     // 先提交当前行（同步重渲染）
-    const hit = document.elementFromPoint(e.clientX, e.clientY) || t   // 重渲染后用坐标重新定位
-    const blk = hit.closest('.blk[data-s]')
-    if (blk) {
-        e.preventDefault()   // 阻止默认 blur 干扰（已手动提交）
-        openLineEditor(e, blk)
-        return
-    }
-    // 点击文档末尾空白处（最后一个块下方）→ 追加空行编辑器（Obsidian 习惯：点哪儿写哪儿）
-    const paneHit = hit.closest ? hit.closest('.pane') : null
-    const paneIdx = paneHit ? Number(paneHit.dataset.pane) : state.activePane
-    const pane = paneEls(paneIdx)
-    const lastBlk = [...pane.liveEditor.querySelectorAll('.blk[data-s]')].pop()
-    if (lastBlk) {
-        const lb = lastBlk.getBoundingClientRect()
-        if (e.clientY > lb.bottom + 4) {
-            e.preventDefault()
-            appendTailLineEditor(parseInt(lastBlk.dataset.e, 10) + 1, paneIdx)
-        }
-    }
+    if (liveEdit) commitLineEdit()                                     // 兼容旧行编辑器残留
+    // 整文档编辑：不拦截 mousedown，让浏览器正常放置光标 / 开始跨行选择
 }
 els.liveEditor.addEventListener('mousedown', handleLiveEditorMouseDown)
 
 function handleLiveEditorClick(e) {
-    // 交互元素优先处理（先提交未完成的行编辑）；行编辑已由 mousedown 处理
+    // 交互元素优先处理
     const cb = e.target.closest('input[type=checkbox][data-line]')
     if (cb) { if (liveEdit) commitLineEdit(); toggleTaskLine(cb); return }
-    // wikilink：Ctrl/Cmd+点击才跳转；普通点击已由 mousedown 进入行编辑（[[...]] 可直接编辑）
+    // wikilink：Ctrl/Cmd+点击才跳转；普通点击就地编辑（整文档可编辑，直接改 [[...]]）
     const wl = e.target.closest('.wikilink')
     if (wl) {
         if (e.ctrlKey || e.metaKey) {
@@ -2322,9 +3048,21 @@ function showPaneEditorInput(i) {
         P.liveEditor.classList.remove('hidden')
         P.editor.classList.add('hidden')
         renderLiveEditor(i)
-        // 空文档（新建笔记）：自动打开第 0 行编辑器，用户可直接输入（贴合 Obsidian）
+        // 空文档（新建笔记）：把光标放进可编辑区，用户可直接输入（整文档编辑）
         if (i === state.activePane && f.content.trim() === '') {
-            setTimeout(() => openLineAt(0, i, 0), 0)
+            setTimeout(() => {
+                const body = P.liveEditor.querySelector('.md-body')
+                if (body && !P.liveEditor.classList.contains('hidden')) {
+                    body.focus()
+                    try {
+                        const r = document.createRange()
+                        r.selectNodeContents(body)
+                        r.collapse(false)
+                        const sel = window.getSelection()
+                        sel.removeAllRanges(); sel.addRange(r)
+                    } catch { /* noop */ }
+                }
+            }, 0)
         }
     } else {
         P.editor.classList.remove('hidden')
@@ -3448,11 +4186,23 @@ function handleLiveEditorCtxMenu(e) {
             pos = lineSrcOffset(lineNo) + (liveEdit.ta.selectionStart || 0)   // 光标位置，而非行首
         }
     } else {
-        const blk = target.closest('.blk[data-s]')
-        pos = blk ? nodeToSrcOffset(blk, target, 0) : -1
-        if (blk) {
-            const rowEl = rowElementOf(target, blk)
-            lineNo = rowEl ? rowElToLineNo(blk, rowEl) : parseInt(blk.dataset.s, 10)
+        // 整文档模式：用整文档序列化计算光标源偏移（含行首标记，跨块精确）
+        const P = curPaneEls()
+        const dbody = P.liveEditor ? P.liveEditor.querySelector('.md-body') : null
+        if (dbody && dbody.contains(target)) {
+            pos = docTextUpTo(dbody, target, 0).length
+            const blk = target.closest('.blk[data-s]')
+            if (blk) {
+                const rowEl = rowElementOf(target, blk)
+                lineNo = rowEl ? rowElToLineNo(blk, rowEl) : parseInt(blk.dataset.s, 10)
+            }
+        } else {
+            const blk = target.closest('.blk[data-s]')
+            pos = blk ? nodeToSrcOffset(blk, target, 0) : -1
+            if (blk) {
+                const rowEl = rowElementOf(target, blk)
+                lineNo = rowEl ? rowElToLineNo(blk, rowEl) : parseInt(blk.dataset.s, 10)
+            }
         }
     }
     if (pos >= 0) lkInsertPos = pos
@@ -3466,11 +4216,20 @@ function handleLiveEditorCtxMenu(e) {
             const e = liveEdit.ta.selectionEnd
             if (s >= 0 && e >= 0) selRange = { start: Math.min(s, e), end: Math.max(s, e) }
         } else {
-            const blk = target.closest('.blk[data-s]')
-            if (blk && e.currentTarget.contains(sel.anchorNode)) {
-                const a = nodeToSrcOffset(blk, sel.anchorNode, sel.anchorOffset)
-                const b = nodeToSrcOffset(blk, sel.focusNode, sel.focusOffset)
+            // 整文档模式：选区两端分别做整文档序列化（跨块也精确）
+            const P = curPaneEls()
+            const dbody = P.liveEditor ? P.liveEditor.querySelector('.md-body') : null
+            if (dbody && dbody.contains(sel.anchorNode) && dbody.contains(sel.focusNode)) {
+                const a = docTextUpTo(dbody, sel.anchorNode, sel.anchorOffset).length
+                const b = docTextUpTo(dbody, sel.focusNode, sel.focusOffset).length
                 if (a >= 0 && b >= 0) selRange = { start: Math.min(a, b), end: Math.max(a, b) }
+            } else {
+                const blk = target.closest('.blk[data-s]')
+                if (blk && e.currentTarget.contains(sel.anchorNode)) {
+                    const a = nodeToSrcOffset(blk, sel.anchorNode, sel.anchorOffset)
+                    const b = nodeToSrcOffset(blk, sel.focusNode, sel.focusOffset)
+                    if (a >= 0 && b >= 0) selRange = { start: Math.min(a, b), end: Math.max(a, b) }
+                }
             }
         }
     }
@@ -3576,15 +4335,28 @@ function liveSurround(before, after, placeholder, pos, selRange, lineNo) {
             updateLineStatus()
             return
         }
-        // 非行编辑：插入修饰符对并尝试重开行编辑定位光标
+        // 非行编辑：插入修饰符对，重渲染后把光标放到插入位置之后（整文档模式）
         const beforeLen = before.length
         const insert = before + after
         srcApply((ff) => {
             const norm = ff.content.replace(/\r\n/g, '\n')
             ff.content = norm.slice(0, pos) + insert + norm.slice(pos)
-        }, lineNo)
-        if (lineNo >= 0) {
-            setTimeout(() => {
+        })
+        setTimeout(() => {
+            const P = curPaneEls()
+            const dbody = P.liveEditor ? P.liveEditor.querySelector('.md-body') : null
+            if (dbody) {
+                const pt = docPointFromSrc(dbody, pos + beforeLen)
+                if (pt && pt.node) {
+                    try {
+                        const r = document.createRange()
+                        r.setStart(pt.node, pt.off); r.setEnd(pt.node, pt.off)
+                        const s = window.getSelection()
+                        s.removeAllRanges(); s.addRange(r)
+                        dbody.focus()
+                    } catch { /* noop */ }
+                }
+            } else if (lineNo >= 0) {
                 openLineAt(lineNo)
                 if (liveEdit && liveEdit.ta) {
                     const lineStart = lineSrcOffset(liveEdit.lineNo)
@@ -3592,8 +4364,8 @@ function liveSurround(before, after, placeholder, pos, selRange, lineNo) {
                     liveEdit.ta.focus()
                     liveEdit.ta.setSelectionRange(Math.max(0, caret), Math.max(0, caret))
                 }
-            }, 0)
-        }
+            }
+        }, 0)
     }
 }
 els.liveEditor.addEventListener('contextmenu', handleLiveEditorCtxMenu)

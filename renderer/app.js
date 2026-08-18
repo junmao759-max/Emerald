@@ -1408,6 +1408,19 @@ function handleLiveEditorMouseDown(e) {
     if (blk) {
         e.preventDefault()   // 阻止默认 blur 干扰（已手动提交）
         openLineEditor(e, blk)
+        return
+    }
+    // 点击文档末尾空白处（最后一个块下方）→ 追加空行编辑器（Obsidian 习惯：点哪儿写哪儿）
+    const paneHit = hit.closest ? hit.closest('.pane') : null
+    const paneIdx = paneHit ? Number(paneHit.dataset.pane) : state.activePane
+    const pane = paneEls(paneIdx)
+    const lastBlk = [...pane.liveEditor.querySelectorAll('.blk[data-s]')].pop()
+    if (lastBlk) {
+        const lb = lastBlk.getBoundingClientRect()
+        if (e.clientY > lb.bottom + 4) {
+            e.preventDefault()
+            appendTailLineEditor(parseInt(lastBlk.dataset.e, 10) + 1, paneIdx)
+        }
     }
 }
 els.liveEditor.addEventListener('mousedown', handleLiveEditorMouseDown)
@@ -1528,7 +1541,12 @@ function openLineEditor(e, blk) {
     const hasTablePre = blk.querySelector('table, pre')
     const hasList = blk.querySelector('ul, ol')
     const hasMdLine = blk.querySelector('span.md-line')
-    if (hasTablePre) { openBlockInlineEditor(blk, s, eEnd); return }
+    if (hasTablePre) {
+        // 表格：把光标放到被点击的单元格处（不再是表尾）
+        const caretOff = blk.querySelector('table') ? tableClickCaret(e, blk, s, eEnd) : -1
+        openBlockInlineEditor(blk, s, eEnd, caretOff)
+        return
+    }
     if (eEnd > s && !hasList && !hasMdLine) { openBlockInlineEditor(blk, s, eEnd); return }
     // 行容器定位：用坐标重新命中（重渲染后旧 e.target 已 detached；合成/真实点击坐标始终有效）
     const node = document.elementFromPoint(e.clientX, e.clientY) || e.target
@@ -1897,7 +1915,9 @@ function openLineAt(lineNo, paneIdx, caret) {
         const e = parseInt(blk.dataset.e, 10)
         const hasTablePre = blk.querySelector('table, pre')
         const hasList = blk.querySelector('ul, ol')
-        if (hasTablePre || (e > s && !hasList)) { openBlockInlineEditor(blk, s, e); return }
+        const hasMdLine = blk.querySelector('span.md-line')
+        // 软换行段落（span.md-line）与列表走行模式逐行编辑；表格 / 代码 / 其它多行块整块编辑
+        if (hasTablePre || (e > s && !hasList && !hasMdLine)) { openBlockInlineEditor(blk, s, e); return }
         const rowEl = rowElementsOf(blk)[lineNo - s]
         if (rowEl) { openRowEditor(blk, rowEl, lineNo, caret); return }
         openBlockInlineEditor(blk, s, e)   // 防御：块内无行容器（复杂多行条目）
@@ -1920,7 +1940,8 @@ function openLineAt(lineNo, paneIdx, caret) {
 }
 
 // 复杂块整块就地编辑：块内容替换为多行 textarea（值 = 源行区间 markdown）
-function openBlockInlineEditor(blk, s, e) {
+// caretOff 可选：打开后把光标放到该源偏移（表格点击单元格用）
+function openBlockInlineEditor(blk, s, e, caretOff) {
     const paneIdx = blk.closest('.pane') ? Number(blk.closest('.pane').dataset.pane) : state.activePane
     const tab = state.tabs.find((t) => t.id === state.panes[paneIdx].tabId) || null
     const f = tab && tab.path ? tab : null
@@ -1935,7 +1956,76 @@ function openBlockInlineEditor(blk, s, e) {
     blk.appendChild(ta)
     liveEdit = { mode: 'block', paneIdx, path: f.path, blk, lineNo: s, s, e, ta, cancel: false }
     bindLineEditorEvents(ta)
+    if (typeof caretOff === 'number' && caretOff >= 0 && caretOff <= ta.value.length) {
+        ta.setSelectionRange(caretOff, caretOff)
+    }
     updateLineStatus()
+}
+
+// 表格：点击坐标 → 被点击单元格在块内源码（lines.slice(s,e+1).join('\n')) 的偏移
+function tableClickCaret(e, blk, s, eEnd) {
+    try {
+        const f = state.currentFile
+        if (!f) return -1
+        const lines = f.content.split('\n')
+        const src = lines.slice(s, eEnd + 1).join('\n')
+        const cp = document.caretPositionFromPoint(e.clientX, e.clientY)
+        if (!cp || !cp.offsetNode) return -1
+        const node = cp.offsetNode.nodeType === 1 ? cp.offsetNode : cp.offsetNode.parentNode
+        const td = node.closest ? node.closest('td, th') : null
+        if (!td) return -1
+        const table = td.closest('table')
+        if (!table) return -1
+        const cells = [...table.querySelectorAll('th, td')]
+        const idx = cells.indexOf(td)
+        if (idx < 0) return -1
+        const off = tableCellSrcOffset(src, idx)
+        if (off < 0) return -1
+        // 单元格内渲染偏移（近似：纯文本单元格通常与源一致；带修饰符时落在附近）
+        let inner = 0
+        if (cp.offsetNode.nodeType === 3 && td.contains(cp.offsetNode)) {
+            try {
+                const pre = document.createRange()
+                pre.setStart(td, 0)
+                pre.setEnd(cp.offsetNode, cp.offset)
+                inner = pre.toString().length
+            } catch { inner = 0 }
+        }
+        return off + Math.min(inner, 20)
+    } catch { return -1 }
+}
+
+// 在表格源码中定位第 cellIdx 个单元格的起始偏移（镜像 splitCells 规则：去首尾 | 后按 | 拆分）
+function tableCellSrcOffset(src, cellIdx) {
+    let off = 0
+    let count = 0
+    const srcLines = src.split('\n')
+    for (let li = 0; li < srcLines.length; li++) {
+        const line = srcLines[li]
+        const isSep = li === 1   // 块内第 2 行必为 |---| 分隔行，不产出单元格
+        const lead = /^[ \t]*/.exec(line)[0].length
+        let base = lead
+        let s = line.slice(lead)
+        if (s.startsWith('|')) { base += 1; s = s.slice(1) }
+        if (s.endsWith('|')) s = s.slice(0, -1)
+        const parts = s.split('|')
+        let pos = base
+        for (let k = 0; k < parts.length; k++) {
+            if (!isSep) {
+                if (count === cellIdx) {
+                    let start = pos
+                    while (line[start] === ' ') start++
+                    return off + start
+                }
+                count++
+            }
+            const pipe = line.indexOf('|', pos)
+            if (pipe < 0) break
+            pos = pipe + 1
+        }
+        off += line.length + 1
+    }
+    return -1
 }
 
 // 行编辑器事件绑定：行模式 Enter 提交并前进下一行；块模式（表格/代码）Enter 换行、Ctrl+Enter 提交
@@ -1956,6 +2046,13 @@ function bindLineEditorEvents(ta) {
         }
         if (ev.key === 'ArrowUp') { ev.preventDefault(); moveLineEdit(-1); return }
         if (ev.key === 'ArrowDown') { ev.preventDefault(); moveLineEdit(1); return }
+        // Backspace 行首合并：非空行 + 光标在行首 → 合并到上一行（Obsidian 习惯）
+        if (ev.key === 'Backspace' && liveEdit && liveEdit.mode === 'line'
+            && ta.selectionStart === 0 && ta.selectionEnd === 0 && ta.value !== '') {
+            ev.preventDefault()
+            mergeLineUp()
+            return
+        }
         // Backspace 空行回退：空行 + 光标在行首 → 删除该空行并回到上一行行尾
         if (ev.key === 'Backspace' && liveEdit && liveEdit.mode === 'line' && ta.value === '' && ta.selectionStart === 0) {
             ev.preventDefault()
@@ -1966,6 +2063,24 @@ function bindLineEditorEvents(ta) {
     ta.addEventListener('blur', () => commitLineEdit())
     ta.focus()
     ta.setSelectionRange(ta.value.length, ta.value.length)
+}
+
+// Backspace 行首合并：当前行拼到上一行末尾，光标停在拼接处
+function mergeLineUp() {
+    const le = liveEdit
+    if (!le || le.mode !== 'line') return
+    const tab = state.tabs.find((t) => t.path === le.path)
+        || state.tabs.find((t) => t.id === state.panes[le.paneIdx].tabId) || null
+    const f = tab && tab.path ? tab : null
+    if (!f) return
+    const lines = f.content.split('\n')
+    if (le.lineNo <= 0 || le.lineNo >= lines.length) { commitLineEdit(); return }
+    const prev = lines[le.lineNo - 1] || ''
+    pushEditUndo(f.path)
+    lines[le.lineNo - 1] = prev + le.ta.value
+    lines.splice(le.lineNo, 1)
+    f.content = lines.join('\n')
+    commitAndReopen(le.lineNo - 1, prev.length)
 }
 
 // Backspace 空行回退：删除当前空行并回到上一行行尾（Obsidian 行为）
@@ -2112,10 +2227,13 @@ function appendTailLineEditor(lineNo, paneIdx) {
     if (!nextBlk) P.liveEditor.scrollTop = P.liveEditor.scrollHeight
 }
 
-// 行模式回车：提交当前行并在下方新建行（Obsidian 行为）
-// - 列表行：下方插入同类型标识行（有序编号递增 1. → 2.）；若下一行已是"空标识行"→ 去掉标识下移（结束列表）
-// - 当前行本身是"空标识行"（刚回车产生）→ 回车即去除标识，光标停在该行（两次回车结束列表）
-// - 普通行 / 空行：下方插入空行，光标下移（可无限连续回车产生空行）
+// 行模式回车：Obsidian 行为 + 行中间拆分
+// - 光标在行中间 → 拆分：光标前留在本行，光标后移到下一行（符合人类编辑习惯）
+//   · 列表行：新行沿用列表标识（有序编号递增 1. → 2.）
+// - 光标在行尾 / 空行：
+//   · 列表行：下方插入同类型标识行；若下一行已是"空标识行"→ 去掉标识下移（结束列表）
+//   · 当前行本身是"空标识行"（刚回车产生）→ 回车即去除标识，光标停在该行（两次回车结束列表）
+//   · 普通行 / 空行：下方插入空行，光标下移（可无限连续回车产生空行）
 function lineEditEnter() {
     const le = liveEdit
     if (!le || le.mode !== 'line') { commitLineEdit(); return }
@@ -2125,6 +2243,7 @@ function lineEditEnter() {
     if (!f) { commitLineEdit(); return }
     const lines = f.content.split('\n')
     const curLine = le.ta.value
+    const caret = (typeof le.ta.selectionStart === 'number' && le.ta.selectionStart >= 0) ? le.ta.selectionStart : curLine.length
     const marker = /^(\s*)([-*+]|\d+\.)\s+/.exec(curLine)
     const curIsBareMarker = marker && curLine.slice(marker[0].length) === ''
     const nextNo = le.lineNo + 1
@@ -2135,7 +2254,29 @@ function lineEditEnter() {
         updateLineStatus()
         return
     }
-    // 提交当前行（记录撤销）
+    // —— 行中间拆分：光标前留在本行，光标后（含列表标识）移到下一行 ——
+    if (caret > 0 && caret < curLine.length) {
+        pushEditUndo(f.path)
+        const before = curLine.slice(0, caret)
+        const after = curLine.slice(caret)
+        if (marker && caret >= marker[0].length) {
+            // 列表行：新行沿用标识（有序编号递增）
+            let prefix = marker[1] + marker[2] + ' '
+            const num = /^(\d+)\.$/.exec(marker[2])
+            if (num) prefix = marker[1] + (parseInt(num[1], 10) + 1) + '. '
+            lines[le.lineNo] = before
+            lines.splice(nextNo, 0, prefix + after)
+            f.content = lines.join('\n')
+            commitAndReopen(nextNo, prefix.length)
+            return
+        }
+        lines[le.lineNo] = before
+        lines.splice(nextNo, 0, after)
+        f.content = lines.join('\n')
+        commitAndReopen(nextNo, 0)
+        return
+    }
+    // —— 行尾 / 空行：提交当前行（记录撤销）——
     pushEditUndo(f.path)
     lines[le.lineNo] = curLine
     if (marker) {

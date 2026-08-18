@@ -607,6 +607,8 @@ const els = {
     aiModeLabel: $('aiModeLabel'),
     aiModeMenu: $('aiModeMenu'),
     aiModelChips: $('aiModelChips'),
+    aiSessionNew: $('aiSessionNew'),
+    aiSessionList: $('aiSessionList'),
     dropOverlay: $('dropOverlay'),
     splitDropHint: $('splitDropHint'),
     helpBtn: $('helpBtn'),
@@ -5077,7 +5079,7 @@ const AI_MODE_PROMPTS = {
         + '3) 语言与用户一致（默认中文）。',
 }
 
-let aiConversation = []   // [{ role, content }]
+let aiConversation = []   // [{ role, content }]（当前会话的消息）
 let aiStreaming = false
 let aiCtxOn = true        // 默认自动附上当前文件作为上下文
 let aiMode = 'chat'       // 当前对话模式（chat / quiz / viz / research）
@@ -5085,6 +5087,9 @@ let aiSel = null          // 文本框模式捕获的选区 { start, end }（偏
 let aiSelText = null      // 所见即所得模式捕获的渲染选中文本（无源偏移，直接用文本）
 let aiCurrent = { provider: 'deepseek', baseUrl: '', model: '' }   // 当前生效的供应商 / 模型（模型切换按钮用）
 let aiKeySetMap = {}      // 各供应商是否已保存 Key（{ provider: true }）
+let aiConvos = []         // 会话列表元信息 [{ id, title, updatedAt, count }]
+let aiConvoId = null      // 当前会话 id
+let aiConvoSaveTimer = null   // 会话防抖保存
 
 // 捕获当前选中：必须在隐藏编辑器之前调用（display:none 会清空两者）。
 // 所见即所得模式优先读渲染 DOM 选区；文本框模式读 textarea 选区。
@@ -5120,13 +5125,174 @@ function openAiPanel(skipCapture) {
     els.aiPanel.classList.remove('hidden')
     updateAiCtxStatus()
     loadAiCurrent()
+    loadAiConvos()
     els.aiInput.focus()
 }
 
 function closeAiPanel() {
     if (aiStreaming) window.electronAPI.aiAbort()
+    flushAiConvoSave()   // 关闭面板前落盘当前会话
     els.aiPanel.classList.add('hidden')
     renderActiveFile()   // 恢复之前的视图（编辑器 / 空状态）
+}
+
+// ================================================================
+// 会话记忆：多会话持久化（主进程 userData 落盘）+ 左侧会话栏管理
+// ================================================================
+
+// 欢迎消息（仅 UI 提示，不写入会话）
+function aiWelcomeEl() {
+    const w = document.createElement('div')
+    w.className = 'ai-msg ai-msg-assistant ai-msg-welcome'
+    const t = document.createElement('div')
+    t.className = 'ai-msg-text'
+    t.textContent = '你好！我是你的 Emerald AI 助手 💎。点右上角 ⚙ 配置 API Key（DeepSeek / OpenAI / Claude / 通义千问 等均可），或直接用下方按钮切换模型。当前打开的笔记内容会自动作为提问上下文（选中文本时优先用选中内容），直接提问即可。'
+    w.appendChild(t)
+    return w
+}
+
+// 加载会话列表 + 活动会话内容（打开面板 / 启动时调用）
+async function loadAiConvos() {
+    try {
+        const r = await window.electronAPI.aiConvosList()
+        aiConvos = r.conversations || []
+        // 无会话 → 自动建一个
+        if (!aiConvoId || !aiConvos.some((c) => c.id === aiConvoId)) {
+            if (r.activeId && aiConvos.some((c) => c.id === r.activeId)) aiConvoId = r.activeId
+            else if (aiConvos.length) aiConvoId = aiConvos[aiConvos.length - 1].id
+            else {
+                const c = await window.electronAPI.aiConvoCreate()
+                if (c.ok) {
+                    aiConvoId = c.id
+                    const list = await window.electronAPI.aiConvosList()
+                    aiConvos = list.conversations || []
+                }
+            }
+        }
+        renderAiSessionList()
+        if (aiConvoId) {
+            const loaded = await window.electronAPI.aiConvoLoad(aiConvoId)
+            aiConversation = loaded.messages || []
+        } else {
+            aiConversation = []
+        }
+        renderAiMessages()
+    } catch { /* 忽略 */ }
+}
+
+function renderAiSessionList() {
+    if (!els.aiSessionList) return
+    els.aiSessionList.innerHTML = ''
+    if (!aiConvos.length) {
+        els.aiSessionList.innerHTML = '<div class="ai-session-empty">还没有会话<br>点右上角「＋」新建</div>'
+        return
+    }
+    for (const c of aiConvos) {
+        const item = document.createElement('div')
+        item.className = 'ai-session-item' + (c.id === aiConvoId ? ' active' : '')
+        const title = document.createElement('span')
+        title.className = 'ai-session-title'
+        title.textContent = c.title || '新会话'
+        title.title = c.title || '新会话'
+        const del = document.createElement('button')
+        del.className = 'ai-session-del'
+        del.textContent = '✕'
+        del.title = '删除会话'
+        del.addEventListener('click', (e) => {
+            e.stopPropagation()
+            deleteAiConvo(c.id)
+        })
+        item.append(title, del)
+        item.addEventListener('click', () => switchAiConvo(c.id))
+        els.aiSessionList.appendChild(item)
+    }
+}
+
+// 渲染当前会话的消息（空会话显示欢迎语）
+function renderAiMessages() {
+    els.aiMessages.innerHTML = ''
+    if (!aiConversation.length) {
+        els.aiMessages.appendChild(aiWelcomeEl())
+        return
+    }
+    for (const m of aiConversation) {
+        const msg = aiAppendMessage(m.role, m.content, false)
+        if (m.role === 'assistant') renderAiRichContent(msg.el, msg.textEl, m.content)
+    }
+    els.aiMessages.scrollTop = els.aiMessages.scrollHeight
+}
+
+// 切换到另一会话（先保存当前，再加载目标）
+async function switchAiConvo(id) {
+    if (id === aiConvoId) return
+    flushAiConvoSave()
+    aiConvoId = id
+    const r = await window.electronAPI.aiConvoLoad(id)
+    aiConversation = r.messages || []
+    renderAiSessionList()
+    renderAiMessages()
+}
+
+// 新建会话
+async function newAiConvo() {
+    flushAiConvoSave()
+    const r = await window.electronAPI.aiConvoCreate()
+    if (!r.ok) return
+    aiConvoId = r.id
+    const list = await window.electronAPI.aiConvosList()
+    aiConvos = list.conversations || []
+    aiConversation = []
+    renderAiSessionList()
+    renderAiMessages()
+    els.aiInput.focus()
+}
+
+// 删除会话（确认后删除；若删除的是当前会话，切到最后一个）
+async function deleteAiConvo(id) {
+    const ok = await window.confirm('删除该会话？其中的对话记录将无法恢复。')
+    if (!ok) return
+    const r = await window.electronAPI.aiConvoDelete(id)
+    const list = await window.electronAPI.aiConvosList()
+    aiConvos = list.conversations || []
+    if (id === aiConvoId) {
+        aiConvoId = r.activeId
+        if (aiConvoId) {
+            const loaded = await window.electronAPI.aiConvoLoad(aiConvoId)
+            aiConversation = loaded.messages || []
+        } else {
+            aiConversation = []
+        }
+    }
+    renderAiSessionList()
+    renderAiMessages()
+}
+
+// 防抖保存当前会话（捕获 id 与消息快照，避免切换后串台）
+function scheduleAiConvoSave() {
+    const id = aiConvoId
+    const snapshot = [...aiConversation]
+    clearTimeout(aiConvoSaveTimer)
+    aiConvoSaveTimer = setTimeout(() => saveAiConvo(id, snapshot), 400)
+}
+
+// 立即保存（切换 / 关闭面板 / 删除前调用）
+function flushAiConvoSave() {
+    clearTimeout(aiConvoSaveTimer)
+    if (aiConvoId) saveAiConvo(aiConvoId, [...aiConversation])
+}
+
+async function saveAiConvo(id, messages) {
+    if (!id) return
+    const msgs = Array.isArray(messages) ? messages : aiConversation
+    const firstUser = msgs.find((m) => m.role === 'user')
+    const rawTitle = firstUser ? String(firstUser.content || '').replace(/\s+/g, ' ').trim() : ''
+    const title = rawTitle ? (rawTitle.length > 16 ? rawTitle.slice(0, 16) + '…' : rawTitle) : '新会话'
+    const res = await window.electronAPI.aiConvoSave(id, msgs, title)
+    if (res.ok) {
+        const item = aiConvos.find((c) => c.id === id)
+        if (item) { item.title = title; item.updatedAt = Date.now(); item.count = msgs.length }
+        renderAiSessionList()
+    }
 }
 
 // 构建上下文 system 消息：优先用捕获的选中文本，否则用完整文件内容（截断）
@@ -5190,6 +5356,9 @@ async function aiSend() {
     if (!text || aiStreaming) return
     els.aiInput.value = ''
     aiConversation.push({ role: 'user', content: text })
+    scheduleAiConvoSave()   // 用户消息即持久化（会话记忆）
+    const welcome = els.aiMessages.querySelector('.ai-msg-welcome')
+    if (welcome) welcome.remove()   // 首条消息发出后移除欢迎语
     aiAppendMessage('user', text, false)
 
     const messages = []
@@ -5241,6 +5410,7 @@ window.electronAPI.onAiDone((d) => {
         const t = last.querySelector('.ai-msg-text')
         const raw = t.textContent
         aiConversation.push({ role: 'assistant', content: raw })
+        scheduleAiConvoSave()   // 会话记忆持久化
         // 富内容渲染：<<<QUIZ>>> 题目卡片 / <<<SVG>>> 内联渲染
         renderAiRichContent(last, t, raw)
     }
@@ -5642,6 +5812,7 @@ els.aiModeBtn.addEventListener('click', (e) => {
 })
 els.aiSendBtn.addEventListener('click', aiSend)
 els.aiAbortBtn.addEventListener('click', () => window.electronAPI.aiAbort())
+els.aiSessionNew.addEventListener('click', newAiConvo)
 els.aiInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); aiSend() }
 })
@@ -6405,10 +6576,14 @@ window.electronAPI.onConfirmClose(async () => {
         const ok = await window.confirm('有文件未保存，确定退出吗？')
         if (!ok) return
     }
+    flushAiConvoSave()          // 退出前落盘 AI 会话
     saveSession()               // 退出前保存会话
     window.electronAPI.doClose()
 })
-window.addEventListener('beforeunload', saveSession)  // 兜底：系统方式关闭也保存
+window.addEventListener('beforeunload', () => {
+    flushAiConvoSave()
+    saveSession()               // 兜底：系统方式关闭也保存
+})
 
 // 全局按键：点击别处 / 按 Esc 关闭右键菜单
 document.addEventListener('click', hideContextMenu)

@@ -688,6 +688,99 @@ ipcMain.handle('ai:abort', async () => {
     return { ok: true }
 })
 
+// ================================================================
+// AI 会话记忆：多会话持久化（userData/emerald-ai-conversations.json）
+// ================================================================
+const AI_CONVOS_FILE = 'emerald-ai-conversations.json'
+
+function aiConvosPath() {
+    return path.join(app.getPath('userData'), AI_CONVOS_FILE)
+}
+
+async function readAiConvos() {
+    try {
+        const raw = await fs.readFile(aiConvosPath(), 'utf-8')
+        const data = JSON.parse(raw)
+        return {
+            conversations: Array.isArray(data.conversations) ? data.conversations : [],
+            activeId: data.activeId || null,
+        }
+    } catch {
+        return { conversations: [], activeId: null }
+    }
+}
+
+async function writeAiConvos(data) {
+    await fs.writeFile(aiConvosPath(), JSON.stringify(data, null, 2), 'utf-8')
+}
+
+// 会话列表（只回元信息，不回消息体）
+ipcMain.handle('ai:convosList', async () => {
+    const { conversations, activeId } = await readAiConvos()
+    return {
+        ok: true,
+        conversations: conversations.map((c) => ({
+            id: c.id,
+            title: c.title || '新会话',
+            updatedAt: c.updatedAt || 0,
+            count: (c.messages || []).length,
+        })),
+        activeId,
+    }
+})
+
+// 加载单个会话的消息
+ipcMain.handle('ai:convoLoad', async (_e, id) => {
+    const { conversations } = await readAiConvos()
+    const c = conversations.find((x) => x.id === id)
+    return { ok: true, messages: (c && c.messages) || [], title: (c && c.title) || '' }
+})
+
+// 保存会话（消息 + 自动标题），并设为活动会话
+ipcMain.handle('ai:convoSave', async (_e, id, messages, title) => {
+    if (!id) return { ok: false, error: '会话 id 无效' }
+    const data = await readAiConvos()
+    let c = data.conversations.find((x) => x.id === id)
+    if (!c) {
+        c = { id, title: title || '新会话', createdAt: Date.now(), messages: [] }
+        data.conversations.push(c)
+    }
+    c.messages = Array.isArray(messages) ? messages : []
+    if (typeof title === 'string' && title.trim()) c.title = title.trim()
+    c.updatedAt = Date.now()
+    data.activeId = id
+    await writeAiConvos(data)
+    return { ok: true }
+})
+
+// 新建会话
+ipcMain.handle('ai:convoCreate', async (_e, title) => {
+    const data = await readAiConvos()
+    const c = {
+        id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6),
+        title: title || '新会话',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        messages: [],
+    }
+    data.conversations.push(c)
+    data.activeId = c.id
+    await writeAiConvos(data)
+    return { ok: true, id: c.id }
+})
+
+// 删除会话
+ipcMain.handle('ai:convoDelete', async (_e, id) => {
+    const data = await readAiConvos()
+    data.conversations = data.conversations.filter((x) => x.id !== id)
+    if (data.activeId === id) {
+        const last = data.conversations[data.conversations.length - 1]
+        data.activeId = last ? last.id : null
+    }
+    await writeAiConvos(data)
+    return { ok: true, activeId: data.activeId }
+})
+
 // 递归搜索文件名，最多 200 条结果；遍历文件数上限 20000，防止超大目录全盘扫描卡主进程。
 // 跳过隐藏项和 node_modules（噪音大），无法读取的目录静默跳过。
 ipcMain.handle('fs:search', async (_event, rootPath, query) => {

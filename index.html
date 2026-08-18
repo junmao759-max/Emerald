@@ -2381,6 +2381,117 @@
             color: var(--accent-strong);
             border-color: var(--accent);
         }
+        /* AI 面板主体：左侧会话栏 + 右侧对话区 */
+        .aiBody {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+        }
+        .aiSidebar {
+            flex: none;
+            width: 188px;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-sidebar);
+            border-right: 1px solid var(--border);
+        }
+        .aiSidebarHead {
+            flex: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 10px;
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--text);
+            border-bottom: 1px solid var(--border);
+        }
+        .aiSessionNew {
+            flex: none;
+            width: 22px;
+            height: 22px;
+            border: none;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #10b981, #0d9e6f);
+            color: #fff;
+            font-size: 14px;
+            line-height: 1;
+            cursor: pointer;
+            box-shadow: 0 2px 6px rgba(16, 185, 129, 0.35);
+            transition: transform var(--transition), box-shadow var(--transition);
+        }
+        .aiSessionNew:hover {
+            transform: scale(1.08);
+            box-shadow: 0 3px 10px rgba(16, 185, 129, 0.45);
+        }
+        .aiSessionList {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 6px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .ai-session-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 8px;
+            border-radius: 7px;
+            font-size: 12px;
+            color: var(--text);
+            cursor: pointer;
+            transition: background var(--transition);
+        }
+        .ai-session-item:hover {
+            background: var(--bg-hover);
+        }
+        .ai-session-item.active {
+            background: var(--accent-soft);
+            color: var(--accent-strong);
+            font-weight: 600;
+        }
+        .ai-session-title {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .ai-session-del {
+            flex: none;
+            border: none;
+            background: none;
+            color: var(--icon-muted);
+            font-size: 10px;
+            cursor: pointer;
+            opacity: 0;
+            border-radius: 4px;
+            padding: 1px 4px;
+            transition: opacity var(--transition);
+        }
+        .ai-session-item:hover .ai-session-del {
+            opacity: 1;
+        }
+        .ai-session-del:hover {
+            color: #e11d48;
+            background: rgba(225, 29, 72, 0.1);
+        }
+        .ai-session-empty {
+            padding: 14px 8px;
+            font-size: 11.5px;
+            color: var(--icon-muted);
+            text-align: center;
+            line-height: 1.6;
+        }
+        .aiChatCol {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+        }
         /* 上下文状态条：默认开启时显示附带文件，简洁绿宝石提示 */
         .aiCtxStatus {
             flex: none;
@@ -4144,23 +4255,33 @@
                         </div>
                         <!-- 上下文状态条：显示当前将附带的笔记上下文 -->
                         <div class="aiCtxStatus" id="aiCtxStatus"></div>
-                        <div class="aiMessages" id="aiMessages">
-                            <div class="ai-msg ai-msg-assistant"><div class="ai-msg-text">你好！我是你的 Emerald AI 助手 💎。点右上角 ⚙ 配置 API Key（DeepSeek / OpenAI / Claude / 通义千问 等均可），或直接用下方按钮切换模型。当前打开的笔记内容会自动作为提问上下文（选中文本时优先用选中内容），直接提问即可。</div></div>
-                        </div>
-                        <div class="aiInputBar">
-                            <button class="aiCtxBtn on" id="aiCtxBtn" title="自动附上当前文件作为上下文（点击切换）">📎 上下文</button>
-                            <textarea id="aiInput" placeholder="输入问题…（Enter 发送 / Shift+Enter 换行）" rows="2"></textarea>
-                            <button class="aiSendBtn" id="aiSendBtn">发送</button>
-                            <button class="aiSendBtn aiAbort hidden" id="aiAbortBtn">停止</button>
-                        </div>
-                        <div class="aiModelBar">
-                            <button class="aiModeBtn" id="aiModeBtn" title="选择对话模式">💬 <span id="aiModeLabel">普通对话</span> <span class="aiCaret">▾</span></button>
-                            <div class="aiModeMenu hidden" id="aiModeMenu"></div>
-                            <button class="aiModelBtn" id="aiModelBtn" title="点击切换模型">
-                                <span class="aiGem">💎</span><span id="aiModelLabel">未设置</span><span class="aiCaret">▾</span>
-                            </button>
-                            <span class="aiModelHint">切换供应商 / 模型 · 对话模式</span>
-                            <div class="aiModelMenu hidden" id="aiModelMenu"></div>
+                        <div class="aiBody">
+                            <!-- 左侧会话栏：管理多个对话上下文 -->
+                            <div class="aiSidebar">
+                                <div class="aiSidebarHead">
+                                    <span>💬 会话</span>
+                                    <button class="aiSessionNew" id="aiSessionNew" title="新建会话">＋</button>
+                                </div>
+                                <div class="aiSessionList" id="aiSessionList"></div>
+                            </div>
+                            <div class="aiChatCol">
+                                <div class="aiMessages" id="aiMessages"></div>
+                                <div class="aiInputBar">
+                                    <button class="aiCtxBtn on" id="aiCtxBtn" title="自动附上当前文件作为上下文（点击切换）">📎 上下文</button>
+                                    <textarea id="aiInput" placeholder="输入问题…（Enter 发送 / Shift+Enter 换行）" rows="2"></textarea>
+                                    <button class="aiSendBtn" id="aiSendBtn">发送</button>
+                                    <button class="aiSendBtn aiAbort hidden" id="aiAbortBtn">停止</button>
+                                </div>
+                                <div class="aiModelBar">
+                                    <button class="aiModeBtn" id="aiModeBtn" title="选择对话模式">💬 <span id="aiModeLabel">普通对话</span> <span class="aiCaret">▾</span></button>
+                                    <div class="aiModeMenu hidden" id="aiModeMenu"></div>
+                                    <button class="aiModelBtn" id="aiModelBtn" title="点击切换模型">
+                                        <span class="aiGem">💎</span><span id="aiModelLabel">未设置</span><span class="aiCaret">▾</span>
+                                    </button>
+                                    <span class="aiModelHint">切换供应商 / 模型 · 对话模式</span>
+                                    <div class="aiModelMenu hidden" id="aiModelMenu"></div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                     <!-- AI 设置对话框 -->

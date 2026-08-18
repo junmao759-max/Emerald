@@ -78,6 +78,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     aiSaveConfig: (cfg) => ipcRenderer.invoke('ai:saveConfig', cfg),
     aiChat: (messages) => ipcRenderer.invoke('ai:chat', messages),
     aiAbort: () => ipcRenderer.invoke('ai:abort'),
+    // 会话记忆（多会话持久化）
+    aiConvosList: () => ipcRenderer.invoke('ai:convosList'),
+    aiConvoLoad: (id) => ipcRenderer.invoke('ai:convoLoad', id),
+    aiConvoSave: (id, messages, title) => ipcRenderer.invoke('ai:convoSave', id, messages, title),
+    aiConvoCreate: (title) => ipcRenderer.invoke('ai:convoCreate', title),
+    aiConvoDelete: (id) => ipcRenderer.invoke('ai:convoDelete', id),
     // 流式回传：ai:chunk（增量文本）/ ai:done（结束）
     onAiChunk: (cb) => ipcRenderer.on('ai:chunk', (_e, d) => cb(d)),
     onAiDone: (cb) => ipcRenderer.on('ai:done', (_e, d) => cb(d)),

@@ -5382,6 +5382,7 @@ function renderAiRichContent(msgEl, textEl, raw) {
     const svgCode = extractSvgCode(raw)
     if (svgCode) {
         textEl.textContent = raw.slice(0, raw.indexOf('<<<SVG>>>')).trim() || ''
+        msgEl.classList.add('ai-msg-wide')   // SVG 消息突破气泡宽度，占满面板
         msgEl.appendChild(renderSvgBlock(svgCode))
         return
     }

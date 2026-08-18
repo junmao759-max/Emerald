@@ -2642,7 +2642,12 @@
             line-height: 1.55;
             animation: msgIn 0.2s ease;
         }
-        /* 可视化制作：内联 SVG 渲染 */
+        /* 可视化制作：内联 SVG 渲染（消息占满面板宽度，SVG 最大化） */
+        .ai-msg-wide {
+            max-width: 100%;
+            width: 100%;
+            align-self: stretch;
+        }
         .ai-svg {
             margin-top: 8px;
             border: 1px solid var(--border);
@@ -2652,6 +2657,9 @@
         }
         .ai-svg svg {
             display: block;
+            width: 100% !important;    /* 覆盖内联宽高：占满容器 */
+            height: auto !important;   /* 按 viewBox 比例自适应高度 */
+            min-height: 240px;         /* 保证小图也不显得过小 */
         }
         .ai-svg-bar {
             display: flex;

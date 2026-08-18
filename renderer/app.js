@@ -593,11 +593,16 @@ const els = {
     aiProvider: $('aiProvider'),
     aiBaseUrl: $('aiBaseUrl'),
     aiModel: $('aiModel'),
+    aiModelList: $('aiModelList'),
     aiKey: $('aiKey'),
+    aiKeyToggle: $('aiKeyToggle'),
     aiProviderHint: $('aiProviderHint'),
     aiCfgErr: $('aiCfgErr'),
     aiCfgCancel: $('aiCfgCancel'),
     aiCfgOk: $('aiCfgOk'),
+    aiModelBtn: $('aiModelBtn'),
+    aiModelLabel: $('aiModelLabel'),
+    aiModelMenu: $('aiModelMenu'),
     dropOverlay: $('dropOverlay'),
     splitDropHint: $('splitDropHint'),
     helpBtn: $('helpBtn'),
@@ -4984,11 +4989,58 @@ els.batchDialogOverlay.addEventListener('click', (e) => {
 // AI 助手（#12，BYO-Key）：配置（safeStorage 加密）+ 流式对话
 // ================================================================
 
+// 预置供应商：baseUrl + 常用模型列表（设置对话框 datalist 与下方模型切换菜单共用）
 const AI_PRESETS = {
-    deepseek: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat', hint: 'Key 将用系统安全存储加密后落盘，不会明文保存。' },
-    openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', hint: 'Key 将用系统安全存储加密后落盘，不会明文保存。' },
-    ollama: { baseUrl: 'http://localhost:11434/v1', model: '', hint: '本地 Ollama 通常无需 Key（留空即可），模型名需已 pull，如 qwen2.5。' },
-    custom: { baseUrl: '', model: '', hint: '任意 OpenAI 兼容端点：填入完整 baseUrl 与模型名。' },
+    deepseek: {
+        label: 'DeepSeek', baseUrl: 'https://api.deepseek.com', defaultModel: 'deepseek-chat',
+        models: ['deepseek-chat', 'deepseek-reasoner'],
+        hint: 'DeepSeek 官方 API（OpenAI 兼容）。Key 将用系统安全存储加密后落盘，不会明文保存。',
+    },
+    openai: {
+        label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o-mini',
+        models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1', 'gpt-4.1-mini'],
+        hint: 'OpenAI 官方 API（OpenAI 兼容）。Key 将用系统安全存储加密后落盘，不会明文保存。',
+    },
+    anthropic: {
+        label: 'Claude（Anthropic）', baseUrl: 'https://api.anthropic.com/v1', defaultModel: 'claude-sonnet-4-5',
+        models: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-4-5', 'claude-3-7-sonnet-latest'],
+        hint: 'Claude 使用 Anthropic Messages API（x-api-key 鉴权，应用内已适配）。Key 将加密保存。',
+    },
+    gemini: {
+        label: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', defaultModel: 'gemini-2.5-flash',
+        models: ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'],
+        hint: 'Gemini 的 OpenAI 兼容端点。Key 将用系统安全存储加密后落盘，不会明文保存。',
+    },
+    moonshot: {
+        label: 'Kimi（月之暗面）', baseUrl: 'https://api.moonshot.cn/v1', defaultModel: 'moonshot-v1-32k',
+        models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
+        hint: 'Kimi 官方 API（OpenAI 兼容）。Key 将用系统安全存储加密后落盘，不会明文保存。',
+    },
+    zhipu: {
+        label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', defaultModel: 'glm-4-flash',
+        models: ['glm-4-plus', 'glm-4-flash', 'glm-4-air'],
+        hint: '智谱 AI 开放平台（OpenAI 兼容）。Key 将用系统安全存储加密后落盘，不会明文保存。',
+    },
+    qwen: {
+        label: '通义千问 Qwen', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModel: 'qwen-plus',
+        models: ['qwen-plus', 'qwen-turbo', 'qwen-max', 'qwen-long'],
+        hint: '阿里云百炼 DashScope 的 OpenAI 兼容端点。Key 将用系统安全存储加密后落盘，不会明文保存。',
+    },
+    groq: {
+        label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', defaultModel: 'llama-3.3-70b-versatile',
+        models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'],
+        hint: 'Groq 极速推理（OpenAI 兼容）。Key 将用系统安全存储加密后落盘，不会明文保存。',
+    },
+    ollama: {
+        label: 'Ollama（本地）', baseUrl: 'http://localhost:11434/v1', defaultModel: '',
+        models: [],
+        hint: '本地 Ollama 通常无需 Key（留空即可），模型名需已 pull，如 qwen2.5。',
+    },
+    custom: {
+        label: '自定义', baseUrl: '', defaultModel: '',
+        models: [],
+        hint: '任意 OpenAI 兼容端点：填入完整 baseUrl 与模型名。',
+    },
 }
 
 let aiConversation = []   // [{ role, content }]
@@ -4996,6 +5048,8 @@ let aiStreaming = false
 let aiCtxOn = true        // 默认自动附上当前文件作为上下文
 let aiSel = null          // 文本框模式捕获的选区 { start, end }（偏移基于 \n 归一化内容）
 let aiSelText = null      // 所见即所得模式捕获的渲染选中文本（无源偏移，直接用文本）
+let aiCurrent = { provider: 'deepseek', baseUrl: '', model: '' }   // 当前生效的供应商 / 模型（模型切换按钮用）
+let aiKeySetMap = {}      // 各供应商是否已保存 Key（{ provider: true }）
 
 // 捕获当前选中：必须在隐藏编辑器之前调用（display:none 会清空两者）。
 // 所见即所得模式优先读渲染 DOM 选区；文本框模式读 textarea 选区。
@@ -5030,6 +5084,7 @@ function openAiPanel(skipCapture) {
     hideAllStates()
     els.aiPanel.classList.remove('hidden')
     updateAiCtxStatus()
+    loadAiCurrent()
     els.aiInput.focus()
 }
 
@@ -5151,6 +5206,81 @@ window.electronAPI.onAiDone((d) => {
     }
 })
 
+// ================================================================
+// 模型切换（对话框下方 💎 按钮）：同供应商换模型 / 跨供应商切换
+// ================================================================
+
+// 读取当前生效配置 → 刷新模型按钮
+async function loadAiCurrent() {
+    try {
+        const r = await window.electronAPI.aiGetConfig()
+        const cfg = r.config || {}
+        aiCurrent = {
+            provider: cfg.provider || 'deepseek',
+            baseUrl: cfg.baseUrl || (AI_PRESETS[cfg.provider] ? AI_PRESETS[cfg.provider].baseUrl : ''),
+            model: cfg.model || '',
+        }
+        aiKeySetMap = cfg.keySetMap || {}
+    } catch { /* 忽略 */ }
+    refreshAiModelBtn()
+}
+
+function refreshAiModelBtn() {
+    if (!els.aiModelLabel) return
+    const p = AI_PRESETS[aiCurrent.provider]
+    els.aiModelLabel.textContent = aiCurrent.model || '未设置'
+    els.aiModelBtn.title = (p ? p.label + ' · ' : '') + (aiCurrent.model || '未设置') + '（点击切换模型）'
+    if (els.aiModelMenu) {
+        els.aiModelMenu.querySelectorAll('.mm-item').forEach((it) => {
+            it.classList.toggle('active', it.dataset.model === aiCurrent.model && it.dataset.provider === aiCurrent.provider)
+        })
+    }
+}
+
+// 构建分组模型菜单（按供应商分组，跨供应商可切换）
+function buildAiModelMenu() {
+    if (!els.aiModelMenu) return
+    els.aiModelMenu.innerHTML = ''
+    for (const key of Object.keys(AI_PRESETS)) {
+        const p = AI_PRESETS[key]
+        if (!p.models || !p.models.length) continue
+        const group = document.createElement('div')
+        group.className = 'mm-provider'
+        group.textContent = p.label
+        els.aiModelMenu.appendChild(group)
+        for (const m of p.models) {
+            const item = document.createElement('div')
+            item.className = 'mm-item'
+            item.dataset.provider = key
+            item.dataset.model = m
+            item.textContent = m
+            item.addEventListener('click', () => switchAiModel(key, m))
+            els.aiModelMenu.appendChild(item)
+        }
+    }
+    refreshAiModelBtn()
+}
+
+// 切换模型：更新当前配置（各供应商 Key 独立保存，互不覆盖）
+async function switchAiModel(provider, model) {
+    const p = AI_PRESETS[provider]
+    if (!p) return
+    els.aiModelMenu.classList.add('hidden')
+    const prev = aiCurrent.provider
+    aiCurrent = { provider, baseUrl: p.baseUrl, model }
+    refreshAiModelBtn()
+    const res = await window.electronAPI.aiSaveConfig({ provider, baseUrl: p.baseUrl, model, key: '' })
+    if (res.ok) {
+        if (prev !== provider && !aiKeySetMap[provider]) {
+            aiAppendMessage('assistant', '已切换到 ' + p.label + ' · ' + model + '（该供应商尚未配置 Key，请在 ⚙ 设置中填写）', false)
+        } else {
+            aiAppendMessage('assistant', '已切换到 ' + p.label + ' · ' + model, false)
+        }
+    } else {
+        aiAppendMessage('assistant', '⚠ 切换模型失败：' + (res.error || ''), false)
+    }
+}
+
 // 设置对话框：读取 / 填写 / 保存
 async function openAiSettings() {
     const r = await window.electronAPI.aiGetConfig()
@@ -5158,22 +5288,44 @@ async function openAiSettings() {
     els.aiProvider.value = cfg.provider || 'deepseek'
     els.aiBaseUrl.value = cfg.baseUrl || ''
     els.aiModel.value = cfg.model || ''
+    aiKeySetMap = cfg.keySetMap || {}
     // Key 只存在于主进程：已配置时显示占位符（留空 = 保存时保留旧 Key）
     els.aiKey.value = ''
-    els.aiKey.placeholder = cfg.keySet ? '已保存（sk-••••••••，留空则不修改）' : 'sk-...（safeStorage 加密保存）'
+    refreshAiKeyPlaceholder()
     if (cfg.keyInvalid) els.aiCfgErr.textContent = '系统安全存储不可用，旧 Key 无法解密，请重新输入'
     else els.aiCfgErr.textContent = ''
     applyAiPreset()
     els.aiSettingsOverlay.classList.remove('hidden')
+    // 同步模型切换按钮
+    aiCurrent = { provider: cfg.provider || 'deepseek', baseUrl: cfg.baseUrl || '', model: cfg.model || '' }
+    refreshAiModelBtn()
+}
+
+function refreshAiKeyPlaceholder() {
+    if (!els.aiKey) return
+    const keySet = !!(aiKeySetMap && aiKeySetMap[els.aiProvider.value])
+    els.aiKey.placeholder = keySet ? '已保存（sk-••••••••，留空则不修改）' : 'sk-...（safeStorage 加密保存）'
 }
 
 function applyAiPreset() {
     const p = AI_PRESETS[els.aiProvider.value]
     if (!p) return
-    // 只有字段为空（或等于旧默认值）时才自动填充，尊重用户已填内容
-    if (!els.aiBaseUrl.value) els.aiBaseUrl.value = p.baseUrl
-    if (!els.aiModel.value) els.aiModel.value = p.model
+    // 当前值若仍为空、或是某个预置供应商的默认值（即用户没自定义过）→ 覆盖为新供应商默认
+    const anyPresetDefaultUrl = Object.values(AI_PRESETS).some((x) => x.baseUrl && x.baseUrl === els.aiBaseUrl.value)
+    const anyPresetDefaultModel = Object.values(AI_PRESETS).some((x) => x.defaultModel && x.defaultModel === els.aiModel.value)
+    if (!els.aiBaseUrl.value || anyPresetDefaultUrl) els.aiBaseUrl.value = p.baseUrl
+    if (!els.aiModel.value || anyPresetDefaultModel) els.aiModel.value = p.defaultModel || (p.models && p.models[0]) || ''
     els.aiProviderHint.textContent = p.hint
+    refreshAiKeyPlaceholder()
+    // 模型候选（datalist）
+    if (els.aiModelList) {
+        els.aiModelList.innerHTML = ''
+        ;(p.models || []).forEach((m) => {
+            const opt = document.createElement('option')
+            opt.value = m
+            els.aiModelList.appendChild(opt)
+        })
+    }
 }
 
 async function saveAiSettings() {
@@ -5193,7 +5345,11 @@ async function saveAiSettings() {
         return
     }
     els.aiSettingsOverlay.classList.add('hidden')
-    aiAppendMessage('assistant', '✓ 配置已保存（' + cfg.provider + ' · ' + cfg.model + '）', false)
+    aiCurrent = { provider: cfg.provider, baseUrl: cfg.baseUrl, model: cfg.model }
+    if (cfg.key) aiKeySetMap[cfg.provider] = true
+    refreshAiModelBtn()
+    const p = AI_PRESETS[cfg.provider]
+    aiAppendMessage('assistant', '✓ 配置已保存（' + (p ? p.label : cfg.provider) + ' · ' + cfg.model + '）', false)
 }
 
 // 用 mousedown 捕获选区：点击按钮的默认行为会先清空 DOM 选区（live 模式），
@@ -5207,6 +5363,24 @@ els.aiCfgOk.addEventListener('click', saveAiSettings)
 els.aiProvider.addEventListener('change', applyAiPreset)
 els.aiSettingsOverlay.addEventListener('click', (e) => {
     if (e.target === els.aiSettingsOverlay) els.aiSettingsOverlay.classList.add('hidden')
+})
+// Key 显示 / 隐藏切换
+els.aiKeyToggle.addEventListener('click', () => {
+    const show = els.aiKey.type === 'password'
+    els.aiKey.type = show ? 'text' : 'password'
+    els.aiKeyToggle.textContent = show ? '🙈' : '👁'
+})
+// 模型切换按钮 / 菜单
+buildAiModelMenu()
+els.aiModelBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    els.aiModelMenu.classList.toggle('hidden')
+})
+document.addEventListener('click', (e) => {
+    if (els.aiModelMenu && !els.aiModelMenu.classList.contains('hidden')
+        && !els.aiModelMenu.contains(e.target) && e.target !== els.aiModelBtn && !els.aiModelBtn.contains(e.target)) {
+        els.aiModelMenu.classList.add('hidden')
+    }
 })
 els.aiSendBtn.addEventListener('click', aiSend)
 els.aiAbortBtn.addEventListener('click', () => window.electronAPI.aiAbort())

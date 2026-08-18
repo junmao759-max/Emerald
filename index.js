@@ -466,20 +466,45 @@ function aiConfigPath() {
     return path.join(app.getPath('userData'), AI_CONFIG_FILE)
 }
 
-// 读取 AI 配置；key 字段用 safeStorage 加密，其余明文
+// 读取 AI 配置；keys（按供应商）与旧 key 字段用 safeStorage 加密，其余明文
 async function readAiConfig() {
-    const def = { provider: 'deepseek', baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat', key: '' }
+    const def = {
+        provider: 'deepseek',
+        baseUrl: 'https://api.deepseek.com',
+        model: 'deepseek-chat',
+        key: '',
+        keys: {},
+    }
     try {
         const raw = await fs.readFile(aiConfigPath(), 'utf-8')
         const cfg = JSON.parse(raw)
-        if (cfg.key) {
+        if (cfg.keys && typeof cfg.keys === 'object') {
+            // 新版：keys[provider] 逐供应商保存
+            for (const k of Object.keys(cfg.keys)) {
+                if (!cfg.keys[k]) { delete cfg.keys[k]; continue }
+                if (safeStorage.isEncryptionAvailable()) {
+                    try { cfg.keys[k] = safeStorage.decryptString(Buffer.from(cfg.keys[k], 'base64')) }
+                    catch { delete cfg.keys[k] }
+                } else {
+                    delete cfg.keys[k]
+                    cfg.keyInvalid = true
+                }
+            }
+        } else if (cfg.key) {
+            // 旧版单 Key：迁移到 keys[provider]
             if (safeStorage.isEncryptionAvailable()) {
-                try { cfg.key = safeStorage.decryptString(Buffer.from(cfg.key, 'base64')) } catch { cfg.key = ''; cfg.keyInvalid = true }
+                try {
+                    cfg.keys = { [cfg.provider || def.provider]: safeStorage.decryptString(Buffer.from(cfg.key, 'base64')) }
+                } catch {
+                    cfg.keys = {}
+                    cfg.keyInvalid = true
+                }
             } else {
-                // 加密不可用时绝不能把密文当明文 Key 用（会 401 且设置框显示密文）
-                cfg.key = ''
+                cfg.keys = {}
                 cfg.keyInvalid = true
             }
+        } else {
+            cfg.keys = {}
         }
         return { ...def, ...cfg }
     } catch {
@@ -489,11 +514,18 @@ async function readAiConfig() {
 
 async function writeAiConfig(cfg) {
     const out = { ...cfg }
-    if (out.key && safeStorage.isEncryptionAvailable()) {
-        out.key = safeStorage.encryptString(out.key).toString('base64')   // 加密落盘
-    } else if (out.key) {
-        return { ok: false, error: '系统安全存储不可用，无法安全保存 API Key' }
+    // 逐供应商加密 keys 映射；旧 key 字段不再写入
+    if (out.keys && typeof out.keys === 'object') {
+        for (const k of Object.keys(out.keys)) {
+            if (!out.keys[k]) continue
+            if (safeStorage.isEncryptionAvailable()) {
+                out.keys[k] = safeStorage.encryptString(out.keys[k]).toString('base64')
+            } else {
+                return { ok: false, error: '系统安全存储不可用，无法安全保存 API Key' }
+            }
+        }
     }
+    delete out.key
     await fs.writeFile(aiConfigPath(), JSON.stringify(out, null, 2), 'utf-8')
     return { ok: true }
 }
@@ -501,13 +533,18 @@ async function writeAiConfig(cfg) {
 // 读取配置给渲染进程：绝不返回明文 Key，只给 keySet 标志（Key 只存在于主进程）
 ipcMain.handle('ai:getConfig', async () => {
     const cfg = await readAiConfig()
+    const keySetMap = {}
+    for (const k of Object.keys(cfg.keys || {})) {
+        if (cfg.keys[k]) keySetMap[k] = true
+    }
     return {
         ok: true,
         config: {
             provider: cfg.provider,
             baseUrl: cfg.baseUrl,
             model: cfg.model,
-            keySet: !!cfg.key,
+            keySet: !!keySetMap[cfg.provider],
+            keySetMap,
             keyInvalid: !!cfg.keyInvalid,
         },
     }
@@ -517,12 +554,15 @@ ipcMain.handle('ai:saveConfig', async (_e, cfg) => {
     try {
         if (!cfg || typeof cfg !== 'object') return { ok: false, error: '配置无效' }
         const prev = await readAiConfig()
+        const provider = cfg.provider || prev.provider
+        const keys = { ...(prev.keys || {}) }
+        // 渲染进程传空 key = 保留该供应商旧 Key；传新 key 才替换
+        if (typeof cfg.key === 'string' && cfg.key.trim()) keys[provider] = cfg.key.trim()
         const next = {
-            provider: cfg.provider || prev.provider,
+            provider,
             baseUrl: cfg.baseUrl || prev.baseUrl,
             model: cfg.model || prev.model,
-            // 渲染进程传空 key = 保留旧 Key；传新 key 才替换
-            key: typeof cfg.key === 'string' && cfg.key.trim() ? cfg.key : prev.key,
+            keys,
         }
         return await writeAiConfig(next)
     } catch (err) {
@@ -533,36 +573,71 @@ ipcMain.handle('ai:saveConfig', async (_e, cfg) => {
 // 当前 AI 请求的控制器（支持取消）
 let aiAbort = null
 
-// 流式对话：从配置读取 Key，主进程 fetch OpenAI 兼容 /chat/completions（SSE）
+// 供应商展示名（错误提示用）
+const AI_PROVIDER_LABELS = {
+    deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Claude', gemini: 'Google Gemini',
+    moonshot: 'Kimi', zhipu: '智谱 GLM', qwen: '通义千问', groq: 'Groq', ollama: 'Ollama', custom: '自定义',
+}
+
+// 流式对话：从配置读取 Key，主进程 fetch（OpenAI 兼容 /chat/completions 或 Anthropic Messages API）
 ipcMain.handle('ai:chat', async (event, messages) => {
     const cfg = await readAiConfig()
-    if (!cfg.key) return { ok: false, error: '未配置 API Key（点标题栏 AI 图标 → 设置）' }
+    const provider = cfg.provider || 'deepseek'
+    const key = (cfg.keys && cfg.keys[provider]) || ''
+    if (!key) {
+        return { ok: false, error: '未配置 ' + (AI_PROVIDER_LABELS[provider] || provider) + ' 的 API Key（点 AI 面板 ⚙ 设置，或用下方 💎 按钮切换模型后配置）' }
+    }
     if (!Array.isArray(messages) || messages.length === 0) return { ok: false, error: '消息为空' }
 
-    const url = (cfg.baseUrl || '').replace(/\/+$/, '') + '/chat/completions'
     const ctrl = new AbortController()
     aiAbort = ctrl
     // 整体超时：SSE 中途挂起（收到 headers 后不再吐数据）时 120s 强制结束，避免 invoke 永久 pending
     const hardTimer = setTimeout(() => ctrl.abort(), 120000)
+    const isAnthropic = provider === 'anthropic'
+    const base = (cfg.baseUrl || '').replace(/\/+$/, '')
+    const url = base + (isAnthropic ? '/messages' : '/chat/completions')
     try {
-        const resp = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer ' + cfg.key,
-            },
-            body: JSON.stringify({
-                model: cfg.model || 'deepseek-chat',
-                messages,
+        let resp
+        if (isAnthropic) {
+            // Anthropic Messages API：system 走顶层字段，鉴权用 x-api-key
+            const sysMsg = messages.find((m) => m.role === 'system')
+            const body = {
+                model: cfg.model || 'claude-sonnet-4-5',
+                messages: messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content })),
+                max_tokens: 4096,
                 stream: true,
-            }),
-            signal: ctrl.signal,
-        })
+            }
+            if (sysMsg && sysMsg.content) body.system = sysMsg.content
+            resp = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': key,
+                    'anthropic-version': '2023-06-01',
+                },
+                body: JSON.stringify(body),
+                signal: ctrl.signal,
+            })
+        } else {
+            resp = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + key,
+                },
+                body: JSON.stringify({
+                    model: cfg.model || 'deepseek-chat',
+                    messages,
+                    stream: true,
+                }),
+                signal: ctrl.signal,
+            })
+        }
         if (!resp.ok) {
             const text = await resp.text().catch(() => '')
             return { ok: false, error: 'AI 服务错误 ' + resp.status + '：' + text.slice(0, 200) }
         }
-        // 解析 SSE 流
+        // 解析 SSE 流：OpenAI 兼容用 choices[0].delta.content；Anthropic 用 content_block_delta.text
         const reader = resp.body.getReader()
         const decoder = new TextDecoder()
         let buf = ''
@@ -579,9 +654,15 @@ ipcMain.handle('ai:chat', async (event, messages) => {
                 if (data === '[DONE]') continue
                 try {
                     const json = JSON.parse(data)
-                    const delta = json.choices && json.choices[0] && json.choices[0].delta
-                    if (delta && delta.content) {
-                        event.sender.send('ai:chunk', { text: delta.content })
+                    if (isAnthropic) {
+                        if (json.type === 'content_block_delta' && json.delta && json.delta.text) {
+                            event.sender.send('ai:chunk', { text: json.delta.text })
+                        }
+                    } else {
+                        const delta = json.choices && json.choices[0] && json.choices[0].delta
+                        if (delta && delta.content) {
+                            event.sender.send('ai:chunk', { text: delta.content })
+                        }
                     }
                 } catch { /* 忽略无法解析的片段 */ }
             }

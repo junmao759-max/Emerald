@@ -2197,29 +2197,32 @@
         }
 
         /* ============================================================
-         * AI 助手（#12，BYO-Key）：面板 + 设置对话框
+         * AI 助手（#12，BYO-Key）：面板 + 设置对话框（Emerald 绿宝石主题）
          * ============================================================ */
         .aiPanel {
             flex: 1;
             min-height: 0;
             display: flex;
             flex-direction: column;
-            background: var(--bg-surface);
+            background: linear-gradient(180deg, var(--bg-surface) 0%, var(--bg-app) 100%);
+            position: relative;
         }
         .aiHeader {
             display: flex;
             align-items: center;
             justify-content: space-between;
             gap: 12px;
-            padding: 8px 16px;
-            border-bottom: 1px solid var(--border);
-            background: var(--bg-toolbar);
+            padding: 9px 16px;
+            background: linear-gradient(120deg, #10b981 0%, #0d9e6f 55%, #0b8f68 100%);
+            border-bottom: 1px solid rgba(0, 0, 0, 0.06);
         }
         .aiTitle {
             flex: 1;
             font-size: 13px;
             font-weight: 700;
-            color: var(--text);
+            color: #fff;
+            letter-spacing: 0.3px;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
         }
         .aiHeaderBtns {
             flex: none;
@@ -2229,57 +2232,82 @@
         .aiIconBtn {
             border: none;
             background: none;
-            color: var(--icon);
+            color: rgba(255, 255, 255, 0.9);
             font-size: 14px;
             cursor: pointer;
             padding: 3px 7px;
             border-radius: 6px;
-            transition: background var(--transition), color var(--transition);
+            transition: background var(--transition), color var(--transition), transform var(--transition);
         }
         .aiIconBtn:hover {
-            background: var(--bg-hover);
-            color: var(--accent-strong);
+            background: rgba(255, 255, 255, 0.16);
+            color: #fff;
+            transform: scale(1.06);
         }
         .aiMessages {
             flex: 1;
             min-height: 0;
             overflow-y: auto;
-            padding: 12px 16px;
+            padding: 14px 16px;
             display: flex;
             flex-direction: column;
             gap: 10px;
         }
         .ai-msg {
             max-width: 85%;
-            padding: 8px 12px;
-            border-radius: 10px;
+            padding: 9px 13px;
+            border-radius: 13px;
             font-size: 13px;
-            line-height: 1.6;
+            line-height: 1.65;
             white-space: pre-wrap;
             word-break: break-word;
+            animation: msgIn 0.16s ease;
+        }
+        @keyframes msgIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
         }
         .ai-msg-user {
             align-self: flex-end;
-            background: var(--accent);
+            background: linear-gradient(135deg, #10b981, #0d9e6f);
             color: #fff;
+            border-bottom-right-radius: 4px;
+            box-shadow: 0 2px 10px rgba(16, 185, 129, 0.28);
         }
         .ai-msg-assistant {
             align-self: flex-start;
-            background: var(--bg-app);
+            background: var(--bg-surface);
             border: 1px solid var(--border);
+            border-left: 3px solid var(--accent);
+            border-bottom-left-radius: 4px;
+            box-shadow: 0 1px 6px rgba(31, 35, 40, 0.05);
         }
         .ai-msg-assistant.streaming {
             border-color: var(--accent);
+            box-shadow: 0 0 0 1px var(--accent-soft);
+        }
+        /* 流式输出：绿宝石闪烁光标 */
+        .ai-msg-assistant.streaming .ai-msg-text::after {
+            content: '▍';
+            color: var(--accent);
+            margin-left: 1px;
+            animation: aiBlink 0.9s steps(2, start) infinite;
+        }
+        @keyframes aiBlink {
+            0%, 60% { opacity: 1; }
+            61%, 100% { opacity: 0; }
         }
         .ai-msg-error {
             align-self: center;
             color: #e11d48;
             font-size: 12px;
+            background: rgba(225, 29, 72, 0.06);
+            border: 1px solid rgba(225, 29, 72, 0.2);
         }
         .aiInputBar {
             display: flex;
             gap: 8px;
-            padding: 8px 12px;
+            padding: 8px 12px 6px;
             border-top: 1px solid var(--border);
             background: var(--bg-toolbar);
             align-items: flex-end;
@@ -2288,49 +2316,55 @@
             flex: 1;
             min-width: 0;
             border: 1px solid var(--border-strong);
-            border-radius: 8px;
-            padding: 8px 10px;
+            border-radius: 10px;
+            padding: 8px 11px;
             font-size: 13px;
             resize: none;
-            background: var(--bg-app);
+            background: var(--bg-surface);
             color: var(--text);
             outline: none;
             font-family: inherit;
-            transition: border-color var(--transition);
+            transition: border-color var(--transition), box-shadow var(--transition);
         }
         .aiInputBar textarea:focus {
             border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
         }
         .aiSendBtn {
             flex: none;
             padding: 7px 16px;
             border: none;
-            border-radius: 8px;
-            background: var(--accent);
+            border-radius: 10px;
+            background: linear-gradient(135deg, #10b981, #0d9e6f);
             color: #fff;
             font-size: 13px;
             font-weight: 600;
             cursor: pointer;
-            transition: background var(--transition), opacity var(--transition);
+            box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+            transition: background var(--transition), opacity var(--transition), transform var(--transition), box-shadow var(--transition);
         }
         .aiSendBtn:hover:not(:disabled) {
-            background: var(--accent-strong);
+            background: linear-gradient(135deg, #0d9e6f, #0b8f68);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.35);
         }
         .aiSendBtn:disabled {
-            opacity: 0.4;
+            opacity: 0.45;
             cursor: default;
+            box-shadow: none;
         }
         .aiSendBtn.aiAbort {
-            background: #e11d48;
+            background: linear-gradient(135deg, #f43f5e, #e11d48);
+            box-shadow: 0 2px 8px rgba(225, 29, 72, 0.3);
         }
         .aiSendBtn.aiAbort:hover {
-            background: #b91c1c;
+            background: linear-gradient(135deg, #e11d48, #be123c);
         }
         .aiCtxBtn {
             flex: none;
             padding: 6px 10px;
             border: 1px solid var(--border-strong);
-            border-radius: 8px;
+            border-radius: 10px;
             background: var(--bg-surface);
             color: var(--icon);
             font-size: 12px;
@@ -2363,18 +2397,178 @@
             background: var(--bg-toolbar);
             color: var(--icon-muted);
         }
+        /* 对话框下方的模型切换条（Emerald 宝石按钮 + 分组菜单） */
+        .aiModelBar {
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 12px 8px;
+            background: var(--bg-toolbar);
+        }
+        .aiModelBtn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border: 1px solid var(--accent);
+            border-radius: 999px;
+            background: var(--bg-surface);
+            color: var(--accent-strong);
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background var(--transition), box-shadow var(--transition), transform var(--transition);
+        }
+        .aiModelBtn:hover {
+            background: var(--accent-soft);
+            box-shadow: 0 2px 8px var(--accent-soft);
+            transform: translateY(-1px);
+        }
+        .aiModelBtn .aiGem {
+            font-size: 13px;
+        }
+        .aiModelBtn .aiCaret {
+            font-size: 9px;
+            opacity: 0.7;
+        }
+        .aiModelHint {
+            font-size: 11px;
+            color: var(--icon-muted);
+        }
+        .aiModelMenu {
+            position: absolute;
+            bottom: calc(100% + 6px);
+            left: 12px;
+            z-index: 60;
+            width: 260px;
+            max-height: 320px;
+            overflow-y: auto;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-strong);
+            border-radius: 10px;
+            box-shadow: var(--shadow-md);
+            padding: 6px;
+            animation: popIn 0.14s ease;
+        }
+        .aiModelMenu .mm-provider {
+            padding: 7px 10px 3px;
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--icon-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+        }
+        .aiModelMenu .mm-item {
+            padding: 6px 12px 6px 14px;
+            font-size: 12.5px;
+            color: var(--text);
+            border-radius: 7px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: background var(--transition);
+        }
+        .aiModelMenu .mm-item:hover {
+            background: var(--accent-soft);
+        }
+        .aiModelMenu .mm-item.active {
+            color: var(--accent-strong);
+            font-weight: 600;
+            background: var(--accent-soft);
+        }
+        .aiModelMenu .mm-item.active::before {
+            content: '💎';
+            font-size: 11px;
+        }
         .aiSelect {
             flex: 1;
             min-width: 0;
             border: 1px solid var(--border-strong);
-            border-radius: 5px;
+            border-radius: 6px;
             background: var(--bg-app);
             color: var(--text);
             font-size: 12.5px;
-            padding: 4px 8px;
+            padding: 5px 8px;
+            outline: none;
         }
+        .aiSelect:focus {
+            border-color: var(--accent);
+        }
+        /* AI 设置对话框：品牌头（绿宝石渐变） + 表单 */
         .aiSettingsCard {
-            width: 400px;
+            width: 460px;
+            max-width: 92vw;
+            padding: 0;
+            border-radius: 14px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .aiSettingsBrand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 16px 20px 13px;
+            background: linear-gradient(120deg, #10b981 0%, #0d9e6f 60%, #0b8f68 100%);
+            border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+        }
+        .aiSettingsLogo {
+            width: 40px;
+            height: 40px;
+            flex: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.18);
+            color: #fff;
+            font-size: 18px;
+            box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
+        }
+        .aiSettingsBrandTitle {
+            font-size: 14.5px;
+            font-weight: 700;
+            color: #fff;
+        }
+        .aiSettingsBrandSub {
+            font-size: 11.5px;
+            color: rgba(255, 255, 255, 0.85);
+            margin-top: 2px;
+        }
+        .aiCfgBody {
+            padding: 14px 20px 4px;
+            margin-bottom: 0;
+        }
+        .aiSettingsCard .modal-actions {
+            padding: 0 20px 16px;
+        }
+        .aiCfgBody .brField {
+            margin: 7px 0;
+        }
+        .aiKeyField {
+            position: relative;
+        }
+        .aiKeyToggle {
+            flex: none;
+            border: 1px solid var(--border-strong);
+            background: var(--bg-app);
+            color: var(--icon);
+            border-radius: 6px;
+            padding: 4px 8px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: border-color var(--transition), color var(--transition);
+        }
+        .aiKeyToggle:hover {
+            border-color: var(--accent);
+            color: var(--accent-strong);
+        }
+        .aiProviderRow {
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
 
         /* ============================================================
@@ -3729,7 +3923,7 @@
                     <!-- AI 助手面板（#12，BYO-Key） -->
                     <div class="aiPanel hidden" id="aiPanel">
                         <div class="aiHeader">
-                            <span class="aiTitle">✨ AI 助手</span>
+                            <span class="aiTitle">💎 Emerald AI 助手</span>
                             <div class="aiHeaderBtns">
                                 <button class="aiIconBtn" id="aiSettingsBtn" title="设置（API Key / 模型）">⚙</button>
                                 <button class="aiIconBtn" id="aiCloseBtn" title="关闭">✕</button>
@@ -3738,7 +3932,7 @@
                         <!-- 上下文状态条：显示当前将附带的笔记上下文 -->
                         <div class="aiCtxStatus" id="aiCtxStatus"></div>
                         <div class="aiMessages" id="aiMessages">
-                            <div class="ai-msg ai-msg-assistant"><div class="ai-msg-text">你好！我是你的本地 AI 助手。先点右上角 ⚙ 配置 API Key（DeepSeek / OpenAI / Ollama 均可）。当前打开的笔记内容会自动作为提问上下文（选中文本时优先用选中内容），直接提问即可。</div></div>
+                            <div class="ai-msg ai-msg-assistant"><div class="ai-msg-text">你好！我是你的 Emerald AI 助手 💎。点右上角 ⚙ 配置 API Key（DeepSeek / OpenAI / Claude / 通义千问 等均可），或直接用下方按钮切换模型。当前打开的笔记内容会自动作为提问上下文（选中文本时优先用选中内容），直接提问即可。</div></div>
                         </div>
                         <div class="aiInputBar">
                             <button class="aiCtxBtn on" id="aiCtxBtn" title="自动附上当前文件作为上下文（点击切换）">📎 上下文</button>
@@ -3746,23 +3940,47 @@
                             <button class="aiSendBtn" id="aiSendBtn">发送</button>
                             <button class="aiSendBtn aiAbort hidden" id="aiAbortBtn">停止</button>
                         </div>
+                        <div class="aiModelBar">
+                            <button class="aiModelBtn" id="aiModelBtn" title="点击切换模型">
+                                <span class="aiGem">💎</span><span id="aiModelLabel">未设置</span><span class="aiCaret">▾</span>
+                            </button>
+                            <span class="aiModelHint">点击切换供应商 / 模型</span>
+                            <div class="aiModelMenu hidden" id="aiModelMenu"></div>
+                        </div>
                     </div>
                     <!-- AI 设置对话框 -->
                     <div class="modal-overlay hidden" id="aiSettingsOverlay">
                         <div class="modal-card aiSettingsCard">
-                            <div class="modal-title">AI 助手设置</div>
-                            <div class="modal-body">
-                                <div class="brField">服务商
+                            <div class="aiSettingsBrand">
+                                <div class="aiSettingsLogo">💎</div>
+                                <div>
+                                    <div class="aiSettingsBrandTitle">AI 助手设置</div>
+                                    <div class="aiSettingsBrandSub">接入 OpenAI 兼容或 Claude 服务 · API Key 加密保存</div>
+                                </div>
+                            </div>
+                            <div class="modal-body aiCfgBody">
+                                <div class="brField aiProviderRow">服务商
                                     <select id="aiProvider" class="aiSelect">
                                         <option value="deepseek">DeepSeek</option>
                                         <option value="openai">OpenAI</option>
+                                        <option value="anthropic">Claude（Anthropic）</option>
+                                        <option value="gemini">Google Gemini</option>
+                                        <option value="moonshot">Kimi（月之暗面）</option>
+                                        <option value="zhipu">智谱 GLM</option>
+                                        <option value="qwen">通义千问 Qwen</option>
+                                        <option value="groq">Groq</option>
                                         <option value="ollama">Ollama（本地）</option>
                                         <option value="custom">自定义</option>
                                     </select>
                                 </div>
                                 <div class="brField">接口地址 <input id="aiBaseUrl" type="text" placeholder="https://api.deepseek.com"></div>
-                                <div class="brField">模型 <input id="aiModel" type="text" placeholder="deepseek-chat"></div>
-                                <div class="brField">API Key <input id="aiKey" type="password" placeholder="sk-...（safeStorage 加密保存）"></div>
+                                <div class="brField">模型 <input id="aiModel" type="text" list="aiModelList" placeholder="deepseek-chat">
+                                    <datalist id="aiModelList"></datalist>
+                                </div>
+                                <div class="brField aiKeyField">API Key
+                                    <input id="aiKey" type="password" placeholder="sk-...（safeStorage 加密保存）">
+                                    <button class="aiKeyToggle" id="aiKeyToggle" title="显示 / 隐藏 Key">👁</button>
+                                </div>
                                 <div class="brHint" id="aiProviderHint">Key 将用系统安全存储加密后落盘，不会明文保存。</div>
                                 <div class="brErr" id="aiCfgErr"></div>
                             </div>

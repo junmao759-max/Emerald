@@ -599,15 +599,15 @@ ipcMain.handle('ai:chat', async (event, messages) => {
     try {
         let resp
         if (isAnthropic) {
-            // Anthropic Messages API：system 走顶层字段，鉴权用 x-api-key
-            const sysMsg = messages.find((m) => m.role === 'system')
+            // Anthropic Messages API：system 走顶层字段（多条 system 合并），鉴权用 x-api-key
+            const sysTexts = messages.filter((m) => m.role === 'system').map((m) => m.content).filter(Boolean)
             const body = {
                 model: cfg.model || 'claude-sonnet-4-5',
                 messages: messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content })),
-                max_tokens: 4096,
+                max_tokens: 8192,
                 stream: true,
             }
-            if (sysMsg && sysMsg.content) body.system = sysMsg.content
+            if (sysTexts.length) body.system = sysTexts.join('\n\n')
             resp = await fetch(url, {
                 method: 'POST',
                 headers: {

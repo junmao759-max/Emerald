@@ -603,6 +603,10 @@ const els = {
     aiModelBtn: $('aiModelBtn'),
     aiModelLabel: $('aiModelLabel'),
     aiModelMenu: $('aiModelMenu'),
+    aiModeBtn: $('aiModeBtn'),
+    aiModeLabel: $('aiModeLabel'),
+    aiModeMenu: $('aiModeMenu'),
+    aiModelChips: $('aiModelChips'),
     dropOverlay: $('dropOverlay'),
     splitDropHint: $('splitDropHint'),
     helpBtn: $('helpBtn'),
@@ -4989,42 +4993,43 @@ els.batchDialogOverlay.addEventListener('click', (e) => {
 // AI 助手（#12，BYO-Key）：配置（safeStorage 加密）+ 流式对话
 // ================================================================
 
-// 预置供应商：baseUrl + 常用模型列表（设置对话框 datalist 与下方模型切换菜单共用）
+// 预置供应商：baseUrl + 常用模型列表（以各供应商官方当前在售模型为准，2025 年末核校）
 const AI_PRESETS = {
     deepseek: {
         label: 'DeepSeek', baseUrl: 'https://api.deepseek.com', defaultModel: 'deepseek-chat',
+        // 官方 API 仅 deepseek-chat（DeepSeek-V3 系列）与 deepseek-reasoner（R1），并无 v4
         models: ['deepseek-chat', 'deepseek-reasoner'],
-        hint: 'DeepSeek 官方 API（OpenAI 兼容）。Key 将用系统安全存储加密后落盘，不会明文保存。',
+        hint: 'DeepSeek 官方 API（OpenAI 兼容）。官方模型为 deepseek-chat（V3 系列）与 deepseek-reasoner（R1），无 v4。Key 将加密保存。',
     },
     openai: {
         label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o-mini',
-        models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1', 'gpt-4.1-mini'],
+        models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o3-mini', 'o3'],
         hint: 'OpenAI 官方 API（OpenAI 兼容）。Key 将用系统安全存储加密后落盘，不会明文保存。',
     },
     anthropic: {
         label: 'Claude（Anthropic）', baseUrl: 'https://api.anthropic.com/v1', defaultModel: 'claude-sonnet-4-5',
-        models: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-4-5', 'claude-3-7-sonnet-latest'],
+        models: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-4-5', 'claude-3-7-sonnet-latest', 'claude-3-5-haiku-latest'],
         hint: 'Claude 使用 Anthropic Messages API（x-api-key 鉴权，应用内已适配）。Key 将加密保存。',
     },
     gemini: {
         label: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', defaultModel: 'gemini-2.5-flash',
-        models: ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'],
+        models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'],
         hint: 'Gemini 的 OpenAI 兼容端点。Key 将用系统安全存储加密后落盘，不会明文保存。',
     },
     moonshot: {
-        label: 'Kimi（月之暗面）', baseUrl: 'https://api.moonshot.cn/v1', defaultModel: 'moonshot-v1-32k',
-        models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
-        hint: 'Kimi 官方 API（OpenAI 兼容）。Key 将用系统安全存储加密后落盘，不会明文保存。',
+        label: 'Kimi（月之暗面）', baseUrl: 'https://api.moonshot.cn/v1', defaultModel: 'kimi-k2-turbo-preview',
+        models: ['kimi-k2-turbo-preview', 'kimi-k2-0711-preview', 'moonshot-v1-32k', 'moonshot-v1-8k', 'moonshot-v1-128k'],
+        hint: 'Kimi 官方 API（OpenAI 兼容），含 kimi-k2 系列与 moonshot-v1 系列。Key 将加密保存。',
     },
     zhipu: {
-        label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', defaultModel: 'glm-4-flash',
-        models: ['glm-4-plus', 'glm-4-flash', 'glm-4-air'],
-        hint: '智谱 AI 开放平台（OpenAI 兼容）。Key 将用系统安全存储加密后落盘，不会明文保存。',
+        label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', defaultModel: 'glm-4.6',
+        models: ['glm-4.6', 'glm-4.5', 'glm-4.5-air', 'glm-4-flash', 'glm-4-plus'],
+        hint: '智谱 AI 开放平台（OpenAI 兼容），当前为 GLM-4.6 / GLM-4.5 系列。Key 将加密保存。',
     },
     qwen: {
-        label: '通义千问 Qwen', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModel: 'qwen-plus',
-        models: ['qwen-plus', 'qwen-turbo', 'qwen-max', 'qwen-long'],
-        hint: '阿里云百炼 DashScope 的 OpenAI 兼容端点。Key 将用系统安全存储加密后落盘，不会明文保存。',
+        label: '通义千问 Qwen', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModel: 'qwen3-plus',
+        models: ['qwen3-max', 'qwen3-plus', 'qwen3-flash', 'qwen-long', 'qwen-plus'],
+        hint: '阿里云百炼 DashScope 的 OpenAI 兼容端点，当前为 Qwen3 系列。Key 将加密保存。',
     },
     groq: {
         label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', defaultModel: 'llama-3.3-70b-versatile',
@@ -5043,9 +5048,39 @@ const AI_PRESETS = {
     },
 }
 
+// 对话模式：选择后注入对应系统提示词（主流的网页版 agent 交互）
+const AI_MODE_META = {
+    chat: { label: '普通对话', icon: '💬' },
+    quiz: { label: '出题目', icon: '📝' },
+    viz: { label: '可视化制作', icon: '📊' },
+    research: { label: '研究', icon: '🔬' },
+}
+const AI_MODE_PROMPTS = {
+    chat: null,
+    quiz: '你现在是「出题助手」，根据用户给出的主题或笔记内容出一组练习题。\n'
+        + '输出要求（严格遵守）：\n'
+        + '1) 第一行先输出标记 <<<QUIZ>>>\n'
+        + '2) 紧接着输出一个 JSON 数组（不要 Markdown 代码围栏，不要其它文字），每个题目对象格式：\n'
+        + '   {"q":"题目","options":["选项A","选项B","选项C","选项D"],"answer":0,"explain":"答案解析"}\n'
+        + '   其中 answer 为正确选项的索引（从 0 开始）。\n'
+        + '3) 出 4~6 题，覆盖核心概念，难度循序渐进；题目语言与用户一致（默认中文）。',
+    viz: '你现在是「数据可视化制作助手」，根据用户的需求生成 SVG 图表或示意图。\n'
+        + '输出要求（严格遵守）：\n'
+        + '1) 第一行先输出标记 <<<SVG>>>\n'
+        + '2) 紧接着输出完整、可独立渲染的 SVG 代码（<svg> 到 </svg>，不要 Markdown 代码围栏，不要其它文字）。\n'
+        + '3) 使用以翡翠绿 #10b981 为主的协调配色、清晰的标题与坐标轴、合适的 viewBox，尺寸建议 800×480。\n'
+        + '4) 不要包含任何脚本、外部引用或 foreignObject。',
+    research: '你现在是「研究分析助手」，针对用户的问题做结构化研究分析。\n'
+        + '输出要求：\n'
+        + '1) 用 Markdown 结构输出：## 概述 → ## 关键发现（要点列表）→ ## 详细分析 → ## 结论与建议。\n'
+        + '2) 区分「已知事实」与「推测」，不确定之处明确标注；涉及数据时给出大致范围而非编造精确数字。\n'
+        + '3) 语言与用户一致（默认中文）。',
+}
+
 let aiConversation = []   // [{ role, content }]
 let aiStreaming = false
 let aiCtxOn = true        // 默认自动附上当前文件作为上下文
+let aiMode = 'chat'       // 当前对话模式（chat / quiz / viz / research）
 let aiSel = null          // 文本框模式捕获的选区 { start, end }（偏移基于 \n 归一化内容）
 let aiSelText = null      // 所见即所得模式捕获的渲染选中文本（无源偏移，直接用文本）
 let aiCurrent = { provider: 'deepseek', baseUrl: '', model: '' }   // 当前生效的供应商 / 模型（模型切换按钮用）
@@ -5149,7 +5184,7 @@ function aiAppendMessage(role, text, streaming) {
     return { el: msg, textEl: t }
 }
 
-// 发送对话：自动附带当前文件上下文（选区优先），主进程流式请求
+// 发送对话：自动附带当前文件上下文（选区优先）+ 对话模式提示词，主进程流式请求
 async function aiSend() {
     const text = els.aiInput.value.trim()
     if (!text || aiStreaming) return
@@ -5158,6 +5193,8 @@ async function aiSend() {
     aiAppendMessage('user', text, false)
 
     const messages = []
+    const modePrompt = aiMode !== 'chat' ? AI_MODE_PROMPTS[aiMode] : null
+    if (modePrompt) messages.push({ role: 'system', content: modePrompt })
     const ctx = aiCtxOn ? buildAiContext() : null
     if (ctx) messages.push({ role: 'system', content: ctx })
     messages.push(...aiConversation)
@@ -5199,12 +5236,157 @@ window.electronAPI.onAiDone((d) => {
     if (!d || !d.ok) {
         if (last) last.classList.add('ai-msg-error')
     }
-    // 把完整回答记入对话（从 DOM 取回）
+    // 把完整回答记入对话（从 DOM 取回，保留原始标记文本）
     if (last) {
         const t = last.querySelector('.ai-msg-text')
-        aiConversation.push({ role: 'assistant', content: t.textContent })
+        const raw = t.textContent
+        aiConversation.push({ role: 'assistant', content: raw })
+        // 富内容渲染：<<<QUIZ>>> 题目卡片 / <<<SVG>>> 内联渲染
+        renderAiRichContent(last, t, raw)
     }
 })
+
+// ================================================================
+// 富内容渲染：出题目（<<<QUIZ>>> + JSON）→ 交互式题目卡片；可视化（<<<SVG>>>）→ 内联 SVG
+// ================================================================
+
+// 从消息文本中提取 <<<QUIZ>>> 后的 JSON 数组
+function parseQuizJson(text) {
+    const idx = String(text || '').indexOf('<<<QUIZ>>>')
+    if (idx < 0) return null
+    const rest = text.slice(idx + 10)
+    const start = rest.indexOf('[')
+    if (start < 0) return null
+    let depth = 0
+    let end = -1
+    for (let i = start; i < rest.length; i++) {
+        const c = rest[i]
+        if (c === '[') depth++
+        else if (c === ']') { depth--; if (depth === 0) { end = i + 1; break } }
+    }
+    if (end < 0) return null
+    try {
+        const arr = JSON.parse(rest.slice(start, end))
+        return Array.isArray(arr) && arr.length ? arr : null
+    } catch { return null }
+}
+
+// 渲染一道题目卡片（点击选项显示对错与解析）
+function renderQuizCard(q, i) {
+    const card = document.createElement('div')
+    card.className = 'ai-quiz'
+    const qEl = document.createElement('div')
+    qEl.className = 'ai-quiz-q'
+    qEl.textContent = (i + 1) + '. ' + String(q.q || '').trim()
+    card.appendChild(qEl)
+    const opts = document.createElement('div')
+    opts.className = 'ai-quiz-opts'
+    const answer = Number(q.answer)
+    ;(Array.isArray(q.options) ? q.options : []).forEach((opt, oi) => {
+        const row = document.createElement('div')
+        row.className = 'ai-quiz-opt'
+        row.dataset.idx = oi
+        const letter = document.createElement('span')
+        letter.className = 'ai-quiz-opt-letter'
+        letter.textContent = String.fromCharCode(65 + oi)
+        const text = document.createElement('span')
+        text.className = 'ai-quiz-opt-text'
+        text.textContent = opt
+        row.append(letter, text)
+        row.addEventListener('click', () => {
+            opts.querySelectorAll('.ai-quiz-opt').forEach((r) => {
+                const idx = Number(r.dataset.idx)
+                r.classList.remove('picked')
+                if (idx === answer) r.classList.add('correct')
+                else if (idx === oi) r.classList.add('wrong', 'picked')
+            })
+            reveal.classList.remove('hidden')
+            card.classList.add('answered')
+        })
+        opts.appendChild(row)
+    })
+    card.appendChild(opts)
+    const reveal = document.createElement('div')
+    reveal.className = 'ai-quiz-answer hidden'
+    const ansLetter = String.fromCharCode(65 + (answer >= 0 ? answer : 0))
+    reveal.textContent = (q.explain ? '解析：' + q.explain : '答案：' + ansLetter)
+    card.appendChild(reveal)
+    return card
+}
+
+// 从消息文本中提取 <<<SVG>>> 后的 SVG 源码
+function extractSvgCode(text) {
+    const s = String(text || '')
+    const idx = s.indexOf('<<<SVG>>>')
+    if (idx < 0) return null
+    let code = s.slice(idx + 9).trim()
+    // 截到下一个标记或代码围栏结束
+    const nextMarker = code.search(/<<<[A-Z]+>>>/)
+    if (nextMarker > 0) code = code.slice(0, nextMarker)
+    code = code.replace(/^```svg\s*/i, '').replace(/```\s*$/, '').trim()
+    return code || null
+}
+
+// 安全渲染 SVG（DOMParser 解析 + 剥离脚本 / 事件属性）
+function renderSvgBlock(code) {
+    const wrap = document.createElement('div')
+    wrap.className = 'ai-svg'
+    try {
+        const doc = new DOMParser().parseFromString(code, 'image/svg+xml')
+        const svg = doc.documentElement
+        if (svg && svg.tagName.toLowerCase() === 'svg' && !doc.querySelector('parsererror')) {
+            svg.querySelectorAll('script, foreignObject, style').forEach((n) => n.remove())
+            ;[...svg.querySelectorAll('*')].forEach((n) => {
+                for (const a of [...n.attributes]) {
+                    if (/^on/i.test(a.name) || /^(href|xlink:href)$/i.test(a.name)) n.removeAttribute(a.name)
+                }
+            })
+            if (!svg.getAttribute('viewBox') && svg.getAttribute('width') && svg.getAttribute('height')) {
+                svg.setAttribute('viewBox', '0 0 ' + svg.getAttribute('width') + ' ' + svg.getAttribute('height'))
+            }
+            svg.setAttribute('width', '100%')
+            svg.setAttribute('height', 'auto')
+            wrap.appendChild(svg)
+            const bar = document.createElement('div')
+            bar.className = 'ai-svg-bar'
+            const hint = document.createElement('span')
+            hint.textContent = '🖼 已渲染 SVG'
+            const copy = document.createElement('button')
+            copy.type = 'button'
+            copy.className = 'ai-svg-copy'
+            copy.textContent = '复制源码'
+            copy.addEventListener('click', () => {
+                navigator.clipboard.writeText(code).then(() => { copy.textContent = '✓ 已复制' })
+                setTimeout(() => { copy.textContent = '复制源码' }, 1500)
+            })
+            bar.append(hint, copy)
+            wrap.insertBefore(bar, svg)
+            return wrap
+        }
+    } catch { /* 解析失败 → 显示源码 */ }
+    const pre = document.createElement('pre')
+    pre.className = 'ai-svg-code'
+    pre.textContent = code
+    wrap.appendChild(pre)
+    return wrap
+}
+
+// 消息富内容后处理：题目卡片 / SVG / 纯文本
+function renderAiRichContent(msgEl, textEl, raw) {
+    const quiz = parseQuizJson(raw)
+    if (quiz) {
+        textEl.textContent = raw.slice(0, raw.indexOf('<<<QUIZ>>>')).trim() || ''
+        quiz.forEach((q, i) => msgEl.appendChild(renderQuizCard(q, i)))
+        return
+    }
+    const svgCode = extractSvgCode(raw)
+    if (svgCode) {
+        textEl.textContent = raw.slice(0, raw.indexOf('<<<SVG>>>')).trim() || ''
+        msgEl.appendChild(renderSvgBlock(svgCode))
+        return
+    }
+    textEl.textContent = raw
+}
 
 // ================================================================
 // 模型切换（对话框下方 💎 按钮）：同供应商换模型 / 跨供应商切换
@@ -5281,6 +5463,68 @@ async function switchAiModel(provider, model) {
     }
 }
 
+// 构建对话模式菜单（普通对话 / 出题目 / 可视化制作 / 研究）
+function buildAiModeMenu() {
+    if (!els.aiModeMenu) return
+    els.aiModeMenu.innerHTML = ''
+    for (const key of Object.keys(AI_MODE_META)) {
+        const meta = AI_MODE_META[key]
+        const item = document.createElement('div')
+        item.className = 'mm-item mode-item'
+        item.dataset.mode = key
+        item.innerHTML = '<span class="mode-icon">' + meta.icon + '</span><span class="mode-label">' + meta.label + '</span>'
+        item.addEventListener('click', () => switchAiMode(key))
+        els.aiModeMenu.appendChild(item)
+    }
+    refreshAiModeBtn()
+}
+
+function refreshAiModeBtn() {
+    if (!els.aiModeLabel) return
+    const meta = AI_MODE_META[aiMode] || AI_MODE_META.chat
+    els.aiModeLabel.textContent = meta.label
+    els.aiModeBtn.innerHTML = meta.icon + ' <span id="aiModeLabel">' + meta.label + '</span> <span class="aiCaret">▾</span>'
+    if (els.aiModeMenu) {
+        els.aiModeMenu.querySelectorAll('.mode-item').forEach((it) => {
+            it.classList.toggle('active', it.dataset.mode === aiMode)
+        })
+    }
+}
+
+function switchAiMode(mode) {
+    if (!AI_MODE_META[mode]) return
+    aiMode = mode
+    els.aiModeMenu.classList.add('hidden')
+    refreshAiModeBtn()
+    const meta = AI_MODE_META[mode]
+    const desc = {
+        chat: '日常问答，不注入额外提示词。',
+        quiz: 'AI 会生成练习题，并在对话中渲染为可交互的题目卡片。',
+        viz: 'AI 会生成 SVG 代码，并在对话中直接渲染图表。',
+        research: 'AI 会按「概述 / 关键发现 / 分析 / 结论」做结构化研究。',
+    }[mode]
+    aiAppendMessage('assistant', '已切换到「' + meta.icon + ' ' + meta.label + '」模式：' + desc, false)
+}
+
+// 设置对话框：供应商模型候选 chips（点击直接选用）
+function renderAiModelChips() {
+    if (!els.aiModelChips) return
+    const p = AI_PRESETS[els.aiProvider.value]
+    els.aiModelChips.innerHTML = ''
+    ;(p.models || []).forEach((m) => {
+        const chip = document.createElement('button')
+        chip.type = 'button'
+        chip.className = 'aiModelChip' + (els.aiModel.value === m ? ' active' : '')
+        chip.textContent = m
+        chip.title = '选择模型 ' + m
+        chip.addEventListener('click', () => {
+            els.aiModel.value = m
+            renderAiModelChips()
+        })
+        els.aiModelChips.appendChild(chip)
+    })
+}
+
 // 设置对话框：读取 / 填写 / 保存
 async function openAiSettings() {
     const r = await window.electronAPI.aiGetConfig()
@@ -5317,7 +5561,7 @@ function applyAiPreset() {
     if (!els.aiModel.value || anyPresetDefaultModel) els.aiModel.value = p.defaultModel || (p.models && p.models[0]) || ''
     els.aiProviderHint.textContent = p.hint
     refreshAiKeyPlaceholder()
-    // 模型候选（datalist）
+    // 模型候选（datalist + chips）
     if (els.aiModelList) {
         els.aiModelList.innerHTML = ''
         ;(p.models || []).forEach((m) => {
@@ -5326,6 +5570,7 @@ function applyAiPreset() {
             els.aiModelList.appendChild(opt)
         })
     }
+    renderAiModelChips()
 }
 
 async function saveAiSettings() {
@@ -5375,12 +5620,24 @@ buildAiModelMenu()
 els.aiModelBtn.addEventListener('click', (e) => {
     e.stopPropagation()
     els.aiModelMenu.classList.toggle('hidden')
+    els.aiModeMenu.classList.add('hidden')
 })
 document.addEventListener('click', (e) => {
     if (els.aiModelMenu && !els.aiModelMenu.classList.contains('hidden')
         && !els.aiModelMenu.contains(e.target) && e.target !== els.aiModelBtn && !els.aiModelBtn.contains(e.target)) {
         els.aiModelMenu.classList.add('hidden')
     }
+    if (els.aiModeMenu && !els.aiModeMenu.classList.contains('hidden')
+        && !els.aiModeMenu.contains(e.target) && e.target !== els.aiModeBtn && !els.aiModeBtn.contains(e.target)) {
+        els.aiModeMenu.classList.add('hidden')
+    }
+})
+// 对话模式切换
+buildAiModeMenu()
+els.aiModeBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    els.aiModeMenu.classList.toggle('hidden')
+    els.aiModelMenu.classList.add('hidden')
 })
 els.aiSendBtn.addEventListener('click', aiSend)
 els.aiAbortBtn.addEventListener('click', () => window.electronAPI.aiAbort())

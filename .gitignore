@@ -9,3 +9,6 @@ build/
 # 缓存
 .npm
 .eslintcache
+
+# 本地回归测试（Electron 测试 harness，不参与打包）
+_test/

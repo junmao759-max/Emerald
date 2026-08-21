@@ -142,8 +142,11 @@
       var t = lines[i].trim()
       if (t === '') {
         // 空行作为独立可编辑块（所见即所得：空行可见、可点击、连续换行可续编）。
-        // annotate=false（blockquote 内部递归）不产出，保持块级分隔语义。
-        if (annotate !== false) {
+        // annotate=false（blockquote 内部递归）不产出 .blk 包裹，但保留空 <p>，
+        // 让 "> a / > / > b" 里的空引用行在序列化时不被整行丢掉（round-trip 保真）。
+        if (annotate === false) {
+          out.push('<p class="md-empty"></p>')
+        } else {
           out.push('<div class="blk" data-s="' + i + '" data-e="' + i + '"><p class="md-empty"></p></div>')
         }
         i++

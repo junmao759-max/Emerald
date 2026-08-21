@@ -38,7 +38,7 @@ const state = {
     gitRemote: null,         // 远程仓库 { name, url, push } | null
     batchMode: false,        // 批量重命名选择模式
     batchSelection: [],      // 批量选择：绝对路径数组（点击顺序）
-    panes: [{ tabId: null, viewMode: 'edit' }],   // #11 分屏：每个面板显示一个标签（tabId 指向 state.tabs）
+    panes: [{ tabId: null, viewMode: 'edit', openSeq: 0 }],   // #11 分屏：每个面板显示一个标签（tabId 指向 state.tabs）
     activePane: 0,           // 活动面板索引（文件打开 / 查找 / 光标操作作用于此面板）
 }
 
@@ -189,7 +189,7 @@ function onEditorInput(paneIndex) {
 // 分屏：新增第二个面板（空白），文件可点进任意面板
 function splitPane() {
     if (state.panes.length >= 2) return
-    state.panes.push({ tabId: null, viewMode: 'edit' })
+    state.panes.push({ tabId: null, viewMode: 'edit', openSeq: 0 })
     pane1Els = createPaneDom()   // 创建 DOM + 事件接线（必须赋值，paneEls(1) 才能复用）
     els.splitBtn.classList.add('on')
     els.splitBtn.title = '取消分屏'
@@ -200,6 +200,8 @@ function splitPane() {
 // 取消分屏：移除第二个面板
 function unsplitPane() {
     if (state.panes.length < 2) return
+    flushDocEditor(1)
+    invalidatePaneOpen(1)
     state.panes.length = 1
     if (pane1Els) { pane1Els.pane.remove(); pane1Els = null }
     state.activePane = 0
@@ -220,12 +222,13 @@ const modal = {
     title: document.getElementById('modalTitle'),
     body: document.getElementById('modalBody'),
     input: document.getElementById('modalInput'),
+    hint: document.getElementById('modalHint'),
     ok: document.getElementById('modalOk'),
     cancel: document.getElementById('modalCancel'),
     resolve: null,
 }
 
-// 打开模态框；opts = { title, message, showInput?, defaultValue?, placeholder?, okText?, showCancel? }
+// 打开模态框；opts = { title, message, showInput?, defaultValue?, placeholder?, hint?, okText?, showCancel? }
 function openModal(opts) {
     modal.title.textContent = opts.title || ''
     modal.body.textContent = opts.message || ''
@@ -233,6 +236,9 @@ function openModal(opts) {
     modal.input.classList.toggle('hidden', !hasInput)
     modal.input.value = opts.defaultValue || ''
     if (opts.placeholder) modal.input.placeholder = opts.placeholder
+    // 输入框下方的提示文字（createNewFile 等场景说明"默认创建 .md"）
+    if (opts.hint) { modal.hint.textContent = opts.hint; modal.hint.classList.remove('hidden') }
+    else modal.hint.classList.add('hidden')
     modal.ok.textContent = opts.okText || '确定'
     modal.cancel.classList.toggle('hidden', opts.showCancel === false)
     modal.overlay.classList.remove('hidden')
@@ -273,8 +279,8 @@ document.addEventListener('keydown', (e) => {
 })
 
 // 覆盖系统对话框：所有 window.prompt/confirm/alert 与裸调用全部走自研模态框
-window.prompt = (message, defaultValue) =>
-    openModal({ title: message, showInput: true, defaultValue })
+window.prompt = (message, defaultValue, opts) =>
+    openModal({ title: message, showInput: true, defaultValue, hint: opts && opts.hint })
 window.confirm = (message) =>
     openModal({ title: '确认', message, showCancel: true })
 window.alert = (message) =>
@@ -1154,9 +1160,17 @@ function renderTabs() {
     }
 }
 
+// 使某面板中尚未完成的文件读取请求失效。
+function invalidatePaneOpen(paneIndex) {
+    const pane = state.panes[paneIndex]
+    if (pane) pane.openSeq = (pane.openSeq || 0) + 1
+}
+
 // 切换到指定标签（显示在活动面板）
 function activateTab(id) {
     if (!state.tabs.some((t) => t.id === id)) return
+    flushDocEditor(state.activePane)
+    invalidatePaneOpen(state.activePane)
     state.panes[state.activePane].tabId = id
     state.activeTabId = id
     renderTabs()
@@ -1226,9 +1240,14 @@ function renderPane(i) {
 
 // 关闭标签；若是激活标签，自动激活相邻的
 async function closeTab(tab) {
+    flushDocEditor()   // 先把整文档编辑器防抖窗口内的编辑同步进 tab.content
+    // 自动保存语义：关闭标签前把修改落盘，避免"关掉再打开发现编辑没了"
     if (tab.content !== tab.originalContent) {
-        const ok = await window.confirm('标签「' + tab.name + '」有未保存的修改，关闭后会丢失，确定吗？')
-        if (!ok) return
+        const res = await writeTabSnapshot(tab)
+        if (!res.ok) {
+            alert('保存失败：' + res.error)
+            return   // 落盘失败不关闭，保留标签让用户处理
+        }
     }
     const idx = state.tabs.indexOf(tab)
     if (idx === -1) return
@@ -1236,6 +1255,7 @@ async function closeTab(tab) {
     // 关闭的标签若被某个面板显示，让该面板退回相邻标签 / 空白
     for (let i = 0; i < state.panes.length; i++) {
         if (state.panes[i].tabId === tab.id) {
+            invalidatePaneOpen(i)
             const next = state.tabs[idx] || state.tabs[idx - 1] || null
             state.panes[i].tabId = next ? next.id : null
         }
@@ -1276,6 +1296,11 @@ async function selectFile(item, rowEl) {
 //   文件已在某标签 → 切到所在面板显示（避免同一文件占多个标签）
 //   否则 → 在"当前活动面板"里打开，替换该面板的旧内容（标签数量不增加）
 async function openFileByPath(path, rowEl) {
+    const paneIdx = state.activePane
+    const pane = state.panes[paneIdx]
+    const rootPath = state.rootPath
+    const openSeq = (pane.openSeq || 0) + 1
+    pane.openSeq = openSeq
     const existing = state.tabs.find((t) => t.path === path)
     if (existing) {
         // 切到包含该文件的标签所在面板
@@ -1284,34 +1309,42 @@ async function openFileByPath(path, rowEl) {
         activateTab(existing.id)
         return
     }
-    // 替换活动面板的标签前，若它有不保存的修改先确认，防止丢数据
+    // 替换活动面板的标签前，先把防抖窗口内的编辑同步并落盘（自动保存语义，避免丢数据）
     const cur = state.currentFile
-    if (cur && cur.path && cur.content !== cur.originalContent) {
-        const ok = await window.confirm('当前标签「' + cur.name + '」有未保存修改，打开其他文件将替换它并丢失修改，确定吗？')
-        if (!ok) return
+    if (cur && cur.path) {
+        flushDocEditor(paneIdx)
+        if (cur.content !== cur.originalContent) {
+            const saveRes = await writeTabSnapshot(cur)
+            if (!saveRes.ok) {
+                alert('保存失败：' + saveRes.error)
+                return
+            }
+        }
     }
     const res = await window.electronAPI.readFile(path)
+    // 用户在读取期间切了标签、点了别的文件或切换了工作区：旧响应不得改变当前界面。
+    if (state.rootPath !== rootPath || state.panes[paneIdx] !== pane || pane.openSeq !== openSeq) return
     if (!res.ok) {
         showEmpty('读取失败：' + res.error, '')
         return
     }
-    // 活动面板当前标签（可能是 null = 空白面板）
-    const activeTabId = state.panes[state.activePane].tabId
+    const loadedExisting = state.tabs.find((t) => t.path === path)
+    if (loadedExisting) {
+        pane.tabId = loadedExisting.id
+        if (paneIdx === state.activePane) syncActiveTabId()
+        renderTabs()
+        renderActiveFile()
+        return
+    }
+    // 活动面板当前标签（可能是 null = 空白面板）。文件对象绝不原地改造成另一个文件：
+    // 输入防抖、自动保存和异步读写可能还持有旧对象，原地改写会让它们跨文件串写。
+    const activeTabId = pane.tabId
     let target = activeTabId ? state.tabs.find((t) => t.id === activeTabId) : null
-    if (!target) {
-        // 空白面板（无标签）：新建一个标签装这个文件
-        state.tabs.push({ id: path, path, name: basename(path), content: res.content, originalContent: res.content })
-        state.panes[state.activePane].tabId = path
-    } else {
-        // 替换活动面板标签的内容（空白标签 = 填充；有文件 = 替换）
-        Object.assign(target, {
-            id: path,
-            path,
-            name: basename(path),
-            content: res.content,
-            originalContent: res.content,
-        })
-        state.panes[state.activePane].tabId = target.id
+    const next = { id: path, path, name: basename(path), content: res.content, originalContent: res.content }
+    state.tabs.push(next)
+    pane.tabId = next.id
+    if (target && !state.panes.some((p, i) => i !== paneIdx && p.tabId === target.id)) {
+        state.tabs = state.tabs.filter((t) => t !== target)
     }
     syncActiveTabId()
     renderTabs()
@@ -1380,7 +1413,8 @@ function updateFileTypeBadge(paneIndex) {
 // 回车拆分 / 行首退格合并 / 表格行等"行语义"操作仍按源行处理。
 // ================================================================
 let docRevealed = new Set()   // 当前展开为原始修饰符文本的节点
-let docSaveTimer = null       // 防抖序列化（DOM → 源）
+const docSaveTimers = new Map() // paneIdx → 防抖序列化计时器（分屏互不取消）
+let docUndoArmed = new Set()  // tabId：该标签"本次连续输入"已记录撤销快照
 
 // —— 渲染后准备：contenteditable + data-mk（每次渲染）+ 事件（每面板一次）——
 function prepareDocEditor(liveEditorEl) {
@@ -1389,6 +1423,7 @@ function prepareDocEditor(liveEditorEl) {
         liveEditorEl._docReady = true
         const paneIdx = liveEditorEl.closest('.pane') ? Number(liveEditorEl.closest('.pane').dataset.pane) : 0
         liveEditorEl.addEventListener('keydown', (e) => onDocKeydown(e, paneIdx))
+        liveEditorEl.addEventListener('beforeinput', onDocBeforeInput)
         liveEditorEl.addEventListener('input', () => onDocInput(paneIdx))
         liveEditorEl.addEventListener('paste', onDocPaste)
         liveEditorEl.addEventListener('click', onDocClick)
@@ -1412,6 +1447,17 @@ function textNodeEff(n) {
     const next = n.nextSibling
     if (prev && prev.nodeType === 1 && prev.tagName === 'BR' && s.startsWith('\n')) s = s.slice(1)
     if (next && next.nodeType === 1 && next.tagName === 'BR' && s.endsWith('\n')) s = s.slice(0, -1)
+    return s
+}
+
+// 代码块内文本：<br> 在 textContent 中不产生字符，会导致粘贴/回车产生的换行在序列化时丢失，
+// 这里把 br 显式还原为 \n，保证代码块内容与源文本一致
+function preCodeText(el) {
+    let s = ''
+    for (const c of el.childNodes) {
+        if (c.nodeType === 3) s += c.data
+        else if (c.nodeType === 1) s += c.tagName === 'BR' ? '\n' : preCodeText(c)
+    }
     return s
 }
 
@@ -1452,14 +1498,16 @@ function serializeBlock(blk) {
     const tag = first.tagName
     if (/^H[1-6]$/.test(tag)) return ['#'.repeat(+tag[1]) + ' ' + inlineSerialize(first)]
     if (tag === 'P') {
-        if (first.classList.contains('md-empty')) return ['']
-        return inlineSerialize(first).split('\n')
+        const s = inlineSerialize(first)
+        // md-empty 只是"渲染时空行的占位"：用户往空行里输入后 class 仍在，内容必须序列化，
+        // 否则打字进空行会整段丢失（回车重渲染后"前面那一行的内容没了"、自动保存也存不进去）
+        return (first.classList.contains('md-empty') && s === '') ? [''] : s.split('\n')
     }
     if (tag === 'HR') return ['---']
     if (tag === 'PRE') {
         const code = first.querySelector('code') || first
         const lang = first.querySelector('code[data-lang]') ? first.querySelector('code[data-lang]').getAttribute('data-lang') : ''
-        const inner = (code.textContent || '').split('\n')
+        const inner = preCodeText(code).split('\n')
         return ['```' + lang, ...inner, '```']
     }
     if (tag === 'UL' || tag === 'OL') return serializeList(first)
@@ -1521,7 +1569,14 @@ function inlineSerializeExcluding(node, kind) {
 }
 function serializeBlockquote(bq) {
     const inner = []
-    for (const child of bq.children) {
+    const els = [...bq.children]
+    if (!els.length) {
+        // 空引用 / 浏览器在空引用里直接输入的文本（<blockquote>abc</blockquote>）：
+        // 不能按元素遍历（会丢文本），统一按内联文本序列化
+        const t = inlineSerialize(bq).replace(/\n+$/, '')
+        if (t) inner.push(...t.split('\n'))
+    }
+    for (const child of els) {
         const tag = child.tagName
         if (/^H[1-6]$/.test(tag)) inner.push('#'.repeat(+tag[1]) + ' ' + inlineSerialize(child))
         else if (tag === 'P') inner.push(...inlineSerialize(child).split('\n'))
@@ -1530,20 +1585,71 @@ function serializeBlockquote(bq) {
         else if (tag === 'PRE') {
             const code = child.querySelector('code') || child
             const lang = child.querySelector('code[data-lang]') ? child.querySelector('code[data-lang]').getAttribute('data-lang') : ''
-            inner.push('```' + lang, ...(code.textContent || '').split('\n'), '```')
+            inner.push('```' + lang, ...preCodeText(code).split('\n'), '```')
         }
         else inner.push(inlineSerialize(child))
     }
+    if (!inner.length) inner.push('')   // 空引用保持一行（否则序列化会整块丢失）
     return inner.map((l) => '> ' + l)
+}
+
+// 引用子块 → 不带 '> ' 前缀的源行（供 blockquoteTextUpTo / blockquotePointAt 复用；
+// 嵌套引用例外：serializeBlockquote 内部已带前缀，调用方会再补一层）
+function blockquoteChildLines(child) {
+    const tag = child.tagName
+    if (tag === 'BLOCKQUOTE') return serializeBlockquote(child)
+    if (/^H[1-6]$/.test(tag)) return ['#'.repeat(+tag[1]) + ' ' + inlineSerialize(child)]
+    if (tag === 'P') return inlineSerialize(child).split('\n')
+    if (tag === 'UL' || tag === 'OL') return serializeList(child)
+    if (tag === 'PRE') {
+        const code = child.querySelector('code') || child
+        const lang = child.querySelector('code[data-lang]') ? child.querySelector('code[data-lang]').getAttribute('data-lang') : ''
+        return ['```' + lang, ...preCodeText(code).split('\n'), '```']
+    }
+    return [inlineSerialize(child)]
+}
+
+// 引用块内光标 → 源文本（每行带 '> ' 前缀，多行/嵌套/列表/代码都能正确定位）
+function blockquoteTextUpTo(bq, node, offset) {
+    let out = ''
+    const children = [...bq.children]
+    for (let ci = 0; ci < children.length; ci++) {
+        const child = children[ci]
+        const ctag = child.tagName
+        let inner
+        if (child.contains(node)) {
+            if (/^H[1-6]$/.test(ctag)) inner = '#'.repeat(+ctag[1]) + ' ' + inlineUpTo(child, node, offset)
+            else if (ctag === 'P') inner = inlineUpTo(child, node, offset)
+            else if (ctag === 'UL' || ctag === 'OL') inner = listTextUpTo(child, node, offset)
+            else if (ctag === 'BLOCKQUOTE') inner = blockquoteTextUpTo(child, node, offset)
+            else if (ctag === 'PRE') {
+                const code = child.querySelector('code') || child
+                inner = '```' + langOf(child) + '\n' + (code.contains(node) ? textBefore(code, node, offset) : preCodeText(code))
+            }
+            else inner = inlineUpTo(child, node, offset)
+            // 光标所在块之后不再继续
+            const lines = inner.split('\n')
+            out += lines.map((l) => '> ' + l).join('\n')
+            return out.replace(/\n+$/, '')
+        }
+        // 光标之前的块：完整序列化（嵌套引用行已带内层前缀，补外层前缀后语义不变）
+        const lines = blockquoteChildLines(child)
+        out += lines.map((l) => '> ' + l).join('\n')
+        if (ci < children.length - 1) out += '\n'
+    }
+    return out.replace(/\n+$/, '')
 }
 function serializeTable(table) {
     const lines = []
-    const header = [...table.querySelectorAll('thead th')].map((c) => inlineSerialize(c))
+    // 单元格内联序列化：空单元格（<td><br></td>，回车加行产生）的 <br> 会序列化成 '\n'，
+    // 直接写入源会把一条表格行拆成多行垃圾数据（重渲染后表格行数疯涨）。空单元格一律输出空串。
+    const cell = (c) => inlineSerialize(c).replace(/\n/g, '')
+    const header = [...table.querySelectorAll('thead th')].map(cell)
     if (!header.length) return lines
     lines.push('| ' + header.join(' | ') + ' |')
     lines.push('| ' + header.map(() => '---').join(' | ') + ' |')
     for (const tr of table.querySelectorAll('tbody tr')) {
-        const cells = [...tr.querySelectorAll('td')].map((c) => inlineSerialize(c))
+        const cells = [...tr.querySelectorAll('td')].map(cell)
         lines.push('| ' + cells.join(' | ') + ' |')
     }
     return lines
@@ -1598,15 +1704,15 @@ function blockTextUpTo(blk, node, offset) {
     if (!first) return ''
     const tag = first.tagName
     if (/^H[1-6]$/.test(tag)) return '#'.repeat(+tag[1]) + ' ' + inlineUpTo(first, node, offset)
-    if (tag === 'P') return first.classList.contains('md-empty') ? '' : inlineUpTo(first, node, offset)
+    if (tag === 'P') return inlineUpTo(first, node, offset)   // 空 p 的 inlineUpTo 本就是 ''，无需 md-empty 特判
     if (tag === 'HR') return '---'
     if (tag === 'PRE') {
         const code = first.querySelector('code') || first
-        if (!code.contains(node)) return '```' + langOf(first) + '\n' + code.textContent
+        if (!code.contains(node)) return '```' + langOf(first) + '\n' + preCodeText(code)
         return '```' + langOf(first) + '\n' + textBefore(code, node, offset)
     }
     if (tag === 'UL' || tag === 'OL') return listTextUpTo(first, node, offset)
-    if (tag === 'BLOCKQUOTE') return '> ' + (blockTextUpTo(first, node, offset) || '')
+    if (tag === 'BLOCKQUOTE') return blockquoteTextUpTo(first, node, offset)
     if (tag === 'TABLE') return tableTextUpTo(first, node, offset)
     return inlineUpTo(first, node, offset)
 }
@@ -1657,9 +1763,30 @@ function inlineUpTo(container, stopNode, stopOffset) {
         if (n.contains(stopNode)) {
             if (tag === 'strong' || tag === 'del' || tag === 'em' || tag === 'mark') {
                 const mk = n.getAttribute('data-mk') || ''
-                out += mk
+                // 光标停在样式元素内文本的起点/终点 → 视为在修饰符之外：
+                // 回车时闭合/开启修饰符不会跟着拆到下一行（"光标紧贴样式后面"应得到普通文本）
+                const atBoundary = (() => {
+                    if (stopNode === n) return true
+                    if (!stopNode || stopNode.nodeType !== 3) return false
+                    const total = (n.textContent || '').length
+                    if (total === 0) return true
+                    let rel = 0
+                    let found = null
+                    const w = (nd) => {
+                        if (found != null) return
+                        if (nd === stopNode) { found = rel; return }
+                        if (nd.nodeType === 3) rel += nd.data.length
+                        else if (nd.nodeType === 1) for (const c of nd.childNodes) w(c)
+                    }
+                    w(n)
+                    if (found == null) return false
+                    if (found + stopOffset <= 0) return 'start'
+                    if (found + stopOffset >= total) return 'end'
+                    return false
+                })()
+                if (atBoundary !== 'start') out += mk
                 for (const c of n.childNodes) { if (done) break; walk(c) }
-                if (!done) out += mk
+                if (!done || atBoundary === 'end') out += mk
                 return
             }
             for (const c of n.childNodes) { if (done) break; walk(c) }
@@ -1740,9 +1867,21 @@ function pointInBlock(blk, inner) {
         const pre = '#'.repeat(+tag[1]) + ' '
         return inlinePointAt(first, 0, Math.max(0, inner - pre.length)) || { node: first, off: 0 }
     }
-    if (tag === 'P') return inlinePointAt(first, 0, inner) || { node: first, off: 0 }
+    if (tag === 'P') {
+        // inner 是按源行 join('\n') 累计的（含行间分隔符）：拆回 (行, 列) 再定位，
+        // 修复多行软换行段落内回车后光标落到段首的问题
+        const lines = inlineSerialize(first).split('\n')
+        let acc = 0
+        for (let li = 0; li < lines.length; li++) {
+            if (inner <= acc + lines[li].length || li === lines.length - 1) {
+                return inlinePointAt(first, li, Math.max(0, inner - acc)) || { node: first, off: 0 }
+            }
+            acc += lines[li].length + 1
+        }
+        return { node: first, off: 0 }
+    }
     if (tag === 'UL' || tag === 'OL') return listPointAt(first, inner)
-    if (tag === 'BLOCKQUOTE') return inlinePointAt(first, 0, Math.max(0, inner - 2)) || { node: first, off: 0 }
+    if (tag === 'BLOCKQUOTE') return blockquotePointAt(first, inner)
     if (tag === 'TABLE') return tablePointAt(first, inner)
     if (tag === 'PRE') {
         const code = first.querySelector('code') || first
@@ -1761,8 +1900,10 @@ function pointInBlock(blk, inner) {
     return { node: first, off: 0 }
 }
 function inlinePointAt(container, lineIndex, col) {
+    // col 是"行内列"（相对该行行首），行号由 <br> 分隔推进。
+    // 每行单独维护 lineStart 基准，避免跨行累计偏移导致 lineIndex>0 永远匹配不上。
     let line = 0
-    let pos = 0
+    let lineStart = 0   // 当前行已消耗的列数（marker / 前置文本）
     let result = null
     const walk = (n) => {
         if (result) return
@@ -1770,21 +1911,26 @@ function inlinePointAt(container, lineIndex, col) {
             const eff = textNodeEff(n)
             const lead = n.data.length - eff.length
             const len = eff.length
-            if (line === lineIndex && col >= pos && col <= pos + len) {
-                result = { node: n, off: Math.max(0, col - pos) + lead }
+            const rel = col - lineStart
+            if (line === lineIndex && rel >= 0 && rel <= len) {
+                result = { node: n, off: Math.max(0, rel) + lead }
                 return
             }
-            pos += len
+            if (line === lineIndex && len === 0 && rel === 0) {
+                result = { node: n, off: 0 }   // 空文本节点兜底
+                return
+            }
+            lineStart += len
             return
         }
         if (n.nodeType !== 1) return
         const tag = n.tagName.toLowerCase()
-        if (tag === 'br') { line++; return }
+        if (tag === 'br') { line++; lineStart = 0; return }
         if (tag === 'strong' || tag === 'del' || tag === 'em' || tag === 'mark') {
             const mk = n.getAttribute('data-mk') || ''
-            pos += mk.length
+            lineStart += mk.length
             for (const c of n.childNodes) walk(c)
-            if (!result) pos += mk.length
+            if (!result) lineStart += mk.length
             return
         }
         for (const c of n.childNodes) walk(c)
@@ -1800,25 +1946,38 @@ function listPointAt(list, inner) {
         if (result) return
         const ordered = ul.tagName === 'OL'
         let idx = 1
-        for (const li of ul.children) {
-            if (li.tagName !== 'LI') continue
+        const lis = [...ul.children].filter((c) => c.tagName === 'LI')
+        for (let i = 0; i < lis.length; i++) {
+            const li = lis[i]
             const marker = ordered ? (idx + '. ').length : 2
             const indent = 2 * depth
             const lineLen = indent + marker + (li.querySelector(':scope input[type=checkbox]') ? 4 : 0)
             const child = li.querySelector(':scope > ul, :scope > ol')
             const childLen = child ? inlineSerialize(child).split('\n').reduce((a, l) => a + l.length + 1, 0) : 0
             const itemLen = lineLen + inlineSerializeExcluding(li, 'list').length
-            if (remaining <= itemLen) {
-                const rel = Math.max(0, remaining - lineLen)
+            const contentLen = Math.max(0, itemLen - lineLen)
+            const isLast = i === lis.length - 1
+            if (remaining <= itemLen || (isLast && !child && remaining <= itemLen + 1)) {
+                // 命中本行；末项无子列表时越界也兜底到行尾（修复列表内回车后光标跳到别处的漂移）
+                const rel = Math.max(0, Math.min(remaining - lineLen, contentLen))
                 result = inlinePointAt(li, 0, rel) || { node: li, off: 0 }
                 return
             }
-            remaining -= itemLen
+            remaining -= itemLen + 1   // 行间 '\n' 分隔符一并扣除（inner 是按 join('\n') 累计的）
             if (child) { depth++; find(child); depth-- }
+            if (result) return
             idx++
         }
     }
     find(list)
+    // 兜底：整个列表都越界 → 最后一个条目行尾（避免光标落到文件开头）
+    if (!result) {
+        const lastLi = (() => { let out = null; const w = (n) => { if (n.tagName === 'LI') out = n; for (const c of n.children) w(c) }; w(list); return out })()
+        if (lastLi) {
+            const lastText = (() => { let t = null; const w = (n) => { if (n.nodeType === 3) t = n; for (const c of n.childNodes) w(c) }; w(lastLi); return t })()
+            result = lastText ? { node: lastText, off: lastText.data.length } : { node: lastLi, off: 0 }
+        }
+    }
     return result
 }
 function tablePointAt(table, inner) {
@@ -1840,6 +1999,37 @@ function tablePointAt(table, inner) {
     return null
 }
 
+// 引用块：源偏移 → DOM 光标。inner 含每行 '> ' 前缀；按行逐块定位，
+// 光标落在对应行对应列（段落行用 inlinePointAt，其余子块退回块首）
+function blockquotePointAt(bq, inner) {
+    let remaining = inner
+    const children = [...bq.children]
+    for (let ci = 0; ci < children.length; ci++) {
+        const child = children[ci]
+        const lines = blockquoteChildLines(child)
+        let srcLen = 0
+        for (const l of lines) srcLen += l.length + 2
+        srcLen += lines.length - 1
+        const isLast = ci === children.length - 1
+        if (remaining <= srcLen || isLast) {
+            let acc = 0
+            for (let li = 0; li < lines.length; li++) {
+                const lineLen = lines[li].length + 2
+                if (remaining <= acc + lineLen || li === lines.length - 1) {
+                    const rel = Math.max(0, Math.min(remaining - acc - 2, lines[li].length))
+                    if (child.tagName === 'P' || /^H[1-6]$/.test(child.tagName)) {
+                        return inlinePointAt(child, li, rel) || { node: child, off: 0 }
+                    }
+                    return { node: child, off: 0 }
+                }
+                acc += lineLen + 1
+            }
+        }
+        remaining -= srcLen + 1
+    }
+    return null
+}
+
 // —— 事件处理 ——
 function onDocKeydown(e, paneIdx) {
     const t = e.target
@@ -1853,6 +2043,33 @@ function onDocKeydown(e, paneIdx) {
         if (info && info.col === 0) {
             e.preventDefault()
             docBackspace(paneIdx)
+            return
+        }
+        // 引用行内容行首退格：去掉引用前缀（Obsidian：行首退格取消引用；嵌套逐级退出）
+        if (info && info.col > 0) {
+            const f = state.currentFile
+            if (f) {
+                const lines = f.content.split('\n')
+                const cur = lines[info.line] || ''
+                const qm = /^(\s*)((?:>\s?)+)/.exec(cur)
+                if (qm && info.col === qm[0].length) {
+                    e.preventDefault()
+                    pushEditUndo(f.path)
+                    // 去掉最后一级 '> '；单级引用整行取消，嵌套逐级退出
+                    const markerPart = qm[2]
+                    const reduced = markerPart.slice(0, -2)   // 去掉末尾 '> '
+                    lines[info.line] = qm[1] + reduced + cur.slice(qm[0].length)
+                    f.content = lines.join('\n')
+                    updateSaveStatus(paneIdx)
+                    renderTabs()
+                    const P = paneEls(paneIdx)
+                    const st = P.liveEditor.scrollTop
+                    renderLiveEditor(paneIdx)
+                    P.liveEditor.scrollTop = st
+                    const body2 = P.liveEditor.querySelector('.md-body')
+                    if (body2) docPlaceCaretAtLine(body2, info.line, (qm[1] + reduced).length)
+                }
+            }
         }
         return
     }
@@ -1864,44 +2081,321 @@ function onDocInput(paneIdx) {
     if (!body) return
     const tab = state.tabs.find((t) => t.id === state.panes[paneIdx].tabId)
     if (!tab) return
-    clearTimeout(docSaveTimer)
-    docSaveTimer = setTimeout(() => {
-        if (!body.isConnected) return
+    // 撤销快照：每次"连续输入"的第一次键入时记录编辑前内容。
+    // 否则 Ctrl+Z（整文档模式拦截了浏览器原生撤销）会把整篇回退到上次回车/退格前的快照，
+    // 最近敲的字连同期间所有改动一并消失。
+    if (!docUndoArmed.has(tab.id)) {
+        pushEditUndo(tab.path || tab.id)
+        docUndoArmed.add(tab.id)
+    }
+    clearTimeout(docSaveTimers.get(paneIdx))
+    const tabId = tab.id
+    docSaveTimers.set(paneIdx, setTimeout(() => {
+        if (!body.isConnected || state.panes[paneIdx]?.tabId !== tabId) return
         tab.content = docSerialize(body)
+        docUndoArmed.delete(tab.id)   // 本次输入已沉淀，下一次键入再记新快照
         updateSaveStatus(paneIdx)
         renderTabs()
         if (paneIdx === state.activePane) renderOutline()
         updateDocStatus(paneIdx)
-    }, 350)
+        docSaveTimers.delete(paneIdx)
+    }, 350))
+}
+
+// 把整文档编辑器当前 DOM 立即序列化进 tab.content。
+// 关闭标签 / 切换文件 / 退出应用 / 切预览前调用，避免 350ms 防抖窗口内的编辑静默丢失。
+function flushDocEditor(paneIdx) {
+    // 行编辑器会临时用 textarea 替换渲染节点；直接序列化会把这一行当成空内容。
+    // 先提交对应面板的行编辑，再从刷新后的 md-body 同步到 tab.content。
+    if (liveEdit && (paneIdx == null || liveEdit.paneIdx === paneIdx)) commitLineEdit()
+    const idxs = paneIdx != null ? [paneIdx] : [0, 1].filter((i) => state.panes[i])
+    for (const idx of idxs) {
+        const P = paneEls(idx)
+        const body = P.liveEditor ? P.liveEditor.querySelector('.md-body') : null
+        // 阅读预览会隐藏 liveEditor，但保留上一文件的 DOM 供下次编辑重渲染。
+        // 面板已切到新文件时，隐藏 DOM 仍是旧文件；绝不能拿它序列化到当前标签。
+        if (!body || !body.isConnected || P.liveEditor.classList.contains('hidden')) continue
+        const tab = state.tabs.find((t) => t.id === state.panes[idx].tabId)
+        if (!tab) continue
+        tab.content = docSerialize(body)
+        if (idx === state.activePane) updateDocStatus(idx)
+    }
+    for (const idx of idxs) {
+        clearTimeout(docSaveTimers.get(idx))
+        docSaveTimers.delete(idx)
+    }
 }
 function onDocPaste(e) {
     const t = e.target
     if (!t || !t.closest || !t.closest('.md-body')) return
     e.preventDefault()
     const text = (e.clipboardData || window.clipboardData).getData('text/plain')
-    if (!text) return
-    // 多行粘贴：逐行插入，用 <br> 分隔（序列化时 br → \n）
-    const lines = text.replace(/\r\n/g, '\n').split('\n')
-    const first = lines.shift()
-    if (first) document.execCommand('insertText', false, first)
-    for (const ln of lines) {
-        document.execCommand('insertHTML', false, '<br>' + escapeHtml(ln))
+    if (text == null || text === '') return
+    const sel = window.getSelection()
+    if (!sel || !sel.rangeCount) return
+    const range = sel.getRangeAt(0)
+    if (!t.contains(range.startContainer)) return
+    const paneIdx = curPaneIdx()
+    // 折叠光标贴在样式元素边界 → 文本插到样式之外，避免粘贴文字继承样式（**x**PASTE 变 **xPASTE**）
+    if (sel.isCollapsed) {
+        const b = styledBoundaryAt(range)
+        if (b) {
+            docPasteInsertOutsideStyle(b, text)
+            commitDocPaste(t)
+            return
+        }
     }
-    onDocInput(curPaneIdx())
+    // 有选区：先删除选区内容（deleteContents 后 range 折叠在起点，容器保留）
+    if (!sel.isCollapsed) range.deleteContents()
+    // 记录插入锚点（起点在样式元素/高亮 token 内部时再规范）
+    const anchorNode = range.startContainer
+    const anchorOff = range.startOffset
+    const hostEl = anchorNode.nodeType === 3 ? anchorNode.parentNode : anchorNode
+    const inPre = !!(hostEl && hostEl.closest('pre'))
+    // pre 内语法高亮 token（.tok）：锚点在 token 文本内部时整体挪到 token 之后，
+    // 粘贴文本成为独立文本节点，不黏连、不继承高亮
+    if (inPre && anchorNode.nodeType === 3 && anchorNode.parentNode
+        && anchorNode.parentNode.classList && anchorNode.parentNode.classList.contains('tok')) {
+        if (anchorOff > 0 && anchorOff < anchorNode.data.length) anchorNode.splitText(anchorOff)
+        const tok = anchorNode.parentNode
+        const codeParent = tok.parentNode
+        if (!codeParent) return
+        const tokIdx = Array.prototype.indexOf.call(codeParent.childNodes, tok)
+        const ref2 = codeParent.childNodes[tokIdx + 1] || null
+        const last2 = docPasteInsertAt(codeParent, ref2, text, inPre)
+        try {
+            const r2 = document.createRange()
+            if (last2.nodeType === 3) { r2.setStart(last2, last2.data.length); r2.setEnd(last2, last2.data.length) }
+            else { r2.setStartAfter(last2); r2.collapse(true) }
+            sel.removeAllRanges(); sel.addRange(r2)
+        } catch { /* noop */ }
+        commitDocPaste(t)
+        return
+    }
+    const parentEl = anchorNode.nodeType === 3 ? anchorNode.parentNode : anchorNode
+    if (!parentEl) return
+    let ref = null
+    if (anchorNode.nodeType === 3) {
+        if (anchorOff < anchorNode.data.length) ref = anchorNode.splitText(anchorOff)
+        else ref = anchorNode.nextSibling
+    } else {
+        ref = anchorNode.childNodes[anchorOff] || null
+    }
+    const last = docPasteInsertAt(parentEl, ref, text, inPre)
+    try {
+        const r = document.createRange()
+        if (last.nodeType === 3) { r.setStart(last, last.data.length); r.setEnd(last, last.data.length) }
+        else { r.setStartAfter(last); r.collapse(true) }
+        sel.removeAllRanges(); sel.addRange(r)
+    } catch { /* noop */ }
+    commitDocPaste(t)
 }
+
+// 粘贴后的 DOM 已完整就绪，立即同步到标签内容，避免后续切换/保存发生在输入防抖窗口内时丢失粘贴。
+// input 事件仍保留，用于撤销快照、脏状态与自动保存调度。
+function commitDocPaste(target) {
+    const body = target.closest('.md-body')
+    const pane = target.closest('.pane')
+    const paneIdx = pane ? Number(pane.dataset.pane) : curPaneIdx()
+    const tab = state.tabs.find((t) => t.id === state.panes[paneIdx].tabId)
+    if (body && tab) tab.content = docSerialize(body)
+    target.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
+// 光标在样式元素边界（strong/del/em/mark 外沿）：把粘贴文本作为普通文本插到元素之外
+function docPasteInsertOutsideStyle(b, text) {
+    const parent = b.el.parentNode
+    if (!parent) return
+    let ref = b.el
+    const insert = (n) => {
+        if (b.side === 'after') parent.insertBefore(n, ref.nextSibling)
+        else parent.insertBefore(n, ref)
+        ref = n
+    }
+    const parts = text.replace(/\r\n/g, '\n').split('\n')
+    for (let i = 0; i < parts.length; i++) {
+        if (parts[i] !== '') insert(document.createTextNode(parts[i]))
+        if (i < parts.length - 1) insert(document.createElement('br'))
+    }
+    try {
+        const r = document.createRange()
+        if (ref.nodeType === 3) { r.setStart(ref, ref.data.length); r.setEnd(ref, ref.data.length) }
+        else { r.setStartAfter(ref); r.collapse(true) }
+        const s = window.getSelection()
+        s.removeAllRanges(); s.addRange(r)
+    } catch { /* noop */ }
+}
+
+// 在 parentEl 内 ref 之前插入文本：pre 内用 '\n' 文本（white-space 下显示为换行，
+// 序列化 preCodeText 无损还原）；正文用 <br> + 文本（序列化 br → \n）。返回最后插入的节点。
+function docPasteInsertAt(parentEl, ref, text, inPre) {
+    text = text.replace(/\r\n/g, '\n')
+    if (inPre) {
+        const node = document.createTextNode(text)
+        parentEl.insertBefore(node, ref)
+        return node
+    }
+    const parts = text.split('\n')
+    let last = null
+    for (let i = 0; i < parts.length; i++) {
+        if (i > 0) last = parentEl.insertBefore(document.createElement('br'), ref)
+        if (parts[i] !== '') last = parentEl.insertBefore(document.createTextNode(parts[i]), ref)
+    }
+    return last
+}
+// 点击坐标 → 样式元素文本内的相对偏移。
+// 返回 -1 = 点击在元素左边界外；text.length = 右边界外 / 文本末尾（视为"样式之外"，不展开修饰符）
+function clickRelIn(node, x, y) {
+    let rel = 0
+    try {
+        const cp = document.caretPositionFromPoint(x, y)
+        if (cp && cp.offsetNode) {
+            if (cp.offsetNode === node || node.contains(cp.offsetNode)) {
+                const pre = document.createRange()
+                pre.setStart(node, 0)
+                pre.setEnd(cp.offsetNode, cp.offset)
+                return pre.toString().length
+            }
+            // 光标解析到元素外：按点击 x 相对元素中线判断在元素之前还是之后
+            const r = node.getBoundingClientRect()
+            return x < r.left + r.width / 2 ? -1 : (node.textContent || '').length
+        }
+    } catch { rel = 0 }
+    // 兜底：用当前选区判断是否在元素内
+    const sel = window.getSelection()
+    if (sel && sel.rangeCount) {
+        const range = sel.getRangeAt(0)
+        if (node.contains(range.startContainer)) {
+            try {
+                const pre = document.createRange()
+                pre.setStart(node, 0)
+                pre.setEnd(range.startContainer, range.startOffset)
+                rel = pre.toString().length
+            } catch { rel = 0 }
+        }
+    }
+    return rel
+}
+
+// 光标是否位于行内样式元素（strong/del/em/mark）的边界处；返回 { el, side: 'before'|'after' }
+// 命中时输入应作为"样式之外的普通文本"处理（Obsidian：只有光标在修饰符内部才继承样式）
+function styledBoundaryAt(range) {
+    const node = range.startContainer
+    const off = range.startOffset
+    if (node.nodeType === 3) {
+        const p = node.parentNode
+        if (p && p.nodeType === 1 && /^(STRONG|DEL|EM|MARK)$/.test(p.tagName)) {
+            const total = (p.textContent || '').length
+            let rel = 0
+            let found = null
+            const w = (n) => {
+                if (found != null) return
+                if (n === node) { found = rel; return }
+                if (n.nodeType === 3) rel += n.data.length
+                else if (n.nodeType === 1) for (const c of n.childNodes) w(c)
+            }
+            w(p)
+            const pos = (found == null ? 0 : found) + off
+            if (total === 0) return { el: p, side: 'after' }          // 空样式元素：一律视为边界后
+            if (pos <= 0) return { el: p, side: 'before' }            // 元素内文本开头
+            if (pos >= total) return { el: p, side: 'after' }         // 元素内文本末尾
+        }
+        return null
+    }
+    if (node.nodeType === 1) {
+        const kids = node.childNodes
+        const prev = kids[off - 1]
+        const next = kids[off]
+        if (prev && prev.nodeType === 1 && /^(STRONG|DEL|EM|MARK)$/.test(prev.tagName)) return { el: prev, side: 'after' }
+        if (next && next.nodeType === 1 && /^(STRONG|DEL|EM|MARK)$/.test(next.tagName)) return { el: next, side: 'before' }
+        // 光标以元素节点形态停在样式元素末尾 / 开头（程序化选区 / 部分输入法场景）：同样按边界处理
+        if (prev && prev.nodeType === 3 && off === kids.length) {
+            const p = prev.parentNode
+            if (p && /^(STRONG|DEL|EM|MARK)$/.test(p.tagName)) return { el: p, side: 'after' }
+        }
+        if (next && next.nodeType === 3 && off === 0) {
+            const p = next.parentNode
+            if (p && /^(STRONG|DEL|EM|MARK)$/.test(p.tagName)) return { el: p, side: 'before' }
+        }
+    }
+    return null
+}
+
+// 样式元素边界处的输入拦截：光标贴在 strong/del/em/mark 的边界时，浏览器默认会把
+// 新文字吞进元素里（"后面的文字继承前面的样式"）。这里在 beforeinput 阶段接管，
+// 把文字作为普通文本插入到元素之外；光标在元素内部（非边界）时不受影响。
+function onDocBeforeInput(e) {
+    if (!e.isTrusted) return   // execCommand 等程序化输入不接管，避免双重插入
+    const t = e.target
+    if (!t || !t.closest || !t.closest('.md-body')) return
+    if (e.inputType !== 'insertText' && e.inputType !== 'insertCompositionText') return
+    const sel = window.getSelection()
+    if (!sel || !sel.rangeCount || !sel.isCollapsed) return
+    const b = styledBoundaryAt(sel.getRangeAt(0))
+    if (!b) return
+    e.preventDefault()
+    const parent = b.el.parentNode
+    if (!parent) return
+    const data = String(e.data == null ? '' : e.data)
+    if (data === '') return
+    let ref = b.el
+    const insert = (n) => {
+        if (b.side === 'after') parent.insertBefore(n, ref.nextSibling)
+        else parent.insertBefore(n, ref)
+        ref = n
+    }
+    const parts = data.split('\n')
+    for (let i = 0; i < parts.length; i++) {
+        insert(document.createTextNode(parts[i]))
+        if (i < parts.length - 1) insert(document.createElement('br'))
+    }
+    // 光标放到最后插入的文本之后
+    try {
+        const r = document.createRange()
+        if (ref.nodeType === 3) { r.setStart(ref, ref.data.length); r.setEnd(ref, ref.data.length) }
+        else { r.setStartAfter(ref); r.collapse(true) }
+        sel.removeAllRanges(); sel.addRange(r)
+    } catch { /* noop */ }
+    // 手动触发 input，让 onDocInput 走序列化 / 自动保存
+    t.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
 function onDocClick(e) {
     const t = e.target
     if (!t || t.nodeType !== 1) return
     const mk = t.getAttribute && t.getAttribute('data-mk')
     if (mk && /^(STRONG|DEL|EM|MARK)$/.test(t.tagName)) {
+        const len = (t.textContent || '').length
+        const rel = clickRelIn(t, e.clientX, e.clientY)
+        // 点击落在元素末段/边缘（含右缘 3px 内）→ 视为"样式之外"：
+        // 光标放到元素之后，输入是普通文本、回车也不会把修饰符拆到下一行
+        // （Obsidian 语义：只有光标真正落在修饰符内部时，输入才继续继承该样式）
+        const rect = t.getBoundingClientRect()
+        const atRightEdge = e.clientX >= rect.right - 3
+        const atLeftEdge = e.clientX <= rect.left + 3
+        if (rel < 0 || rel >= len || atRightEdge || atLeftEdge) {
+            e.preventDefault()
+            try {
+                // 光标放到元素边界外（输入由 onDocBeforeInput 接管为普通文本）
+                const r = document.createRange()
+                if (rel < 0 || atLeftEdge) r.setStartBefore(t)
+                else r.setStartAfter(t)
+                r.collapse(true)
+                const sel = window.getSelection()
+                sel.removeAllRanges(); sel.addRange(r)
+            } catch { /* noop */ }
+            return
+        }
         e.preventDefault()
         const raw = document.createTextNode(mk + t.textContent + mk)
         t.parentNode.replaceChild(raw, t)
         docRevealed.add(raw)
         collapseDocRevealed(raw)
         try {
+            // 光标放到"实际点击的字符位置"（而不是固定在开头修饰符之后）
+            const pos = mk.length + Math.max(0, Math.min(rel, len))
             const r = document.createRange()
-            r.setStart(raw, mk.length); r.setEnd(raw, mk.length)
+            r.setStart(raw, pos); r.setEnd(raw, pos)
             const sel = window.getSelection()
             sel.removeAllRanges(); sel.addRange(r)
         } catch { /* noop */ }
@@ -2018,19 +2512,50 @@ function docPlaceCaretAtLine(body, lineNo, col) {
     updateDocStatus(Number(body.closest('.pane').dataset.pane) || 0)
 }
 
+// 回车拆分点校正：光标所在行左侧存在"未闭合修饰符"（奇数个 ~~ / ** / ==）时，
+// 把拆分点移到右侧第一个同款闭合符之后——换行不把后半截修饰符带到下一行（Obsidian 语义）
+function adjustSplitCaret(curLine, caret) {
+    const left = curLine.slice(0, caret)
+    const right = curLine.slice(caret)
+    for (const mk of ['~~', '**', '==']) {
+        const esc = mk.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        const cnt = (left.match(new RegExp(esc, 'g')) || []).length
+        if (cnt % 2 === 1) {
+            const idx = right.indexOf(mk)
+            if (idx >= 0) return caret + idx + mk.length
+        }
+    }
+    return caret
+}
+
 // —— 回车拆分逻辑（源行操作；lineEditEnter 语义复用）——
 function enterSplit(lines, lineNo, caret) {
     const curLine = lines[lineNo] || ''
+    // 引用行标记：支持嵌套（> > 多级），qm[1]=缩进, qm[2]=全部 '> ' 前缀
+    const qm = /^(\s*)((?:>\s?)+)/.exec(curLine)
+    const curIsBareQuote = qm && curLine.slice(qm[0].length).trim() === ''
+    const nextNo = lineNo + 1
+    // 当前行是"只有 > "的空引用行：回车即退出引用（Obsidian：两次回车结束引用）
+    if (curIsBareQuote) {
+        lines[lineNo] = ''
+        return { lines, newLineNo: lineNo, newCaret: 0 }
+    }
     const marker = /^(\s*)([-*+]|\d+\.)\s+/.exec(curLine)
     const curIsBareMarker = marker && curLine.slice(marker[0].length) === ''
-    const nextNo = lineNo + 1
     if (curIsBareMarker) {
         lines[lineNo] = ''
         return { lines, newLineNo: lineNo, newCaret: 0 }
     }
     if (caret > 0 && caret < curLine.length) {
+        caret = adjustSplitCaret(curLine, caret)   // 光标在未闭合修饰符闭合符前 → 越过闭合符再拆
         const before = curLine.slice(0, caret)
         const after = curLine.slice(caret)
+        if (qm && caret >= qm[0].length) {
+            // 引用行中间拆分：新行沿用完整引用前缀（否则引用被截断成普通文本）
+            lines[lineNo] = before
+            lines.splice(nextNo, 0, qm[1] + qm[2] + after)
+            return { lines, newLineNo: nextNo, newCaret: qm[0].length }
+        }
         if (marker && caret >= marker[0].length) {
             let prefix = marker[1] + marker[2] + ' '
             const num = /^(\d+)\.$/.exec(marker[2])
@@ -2042,6 +2567,18 @@ function enterSplit(lines, lineNo, caret) {
         lines[lineNo] = before
         lines.splice(nextNo, 0, after)
         return { lines, newLineNo: nextNo, newCaret: 0 }
+    }
+    if (qm) {
+        // 引用行行尾回车：下方插入空引用行继续引用；下一行已是空引用行 → 去掉标识下移（结束引用）
+        const nextLine = lines[nextNo] || ''
+        const nextQm = /^(\s*)((?:>\s?)+)/.exec(nextLine)
+        const nextIsBareQuote = nextQm && nextLine.slice(nextQm[0].length).trim() === ''
+        if (nextIsBareQuote) {
+            lines[nextNo] = ''
+            return { lines, newLineNo: nextNo, newCaret: 0 }
+        }
+        lines.splice(nextNo, 0, qm[1] + qm[2])
+        return { lines, newLineNo: nextNo, newCaret: qm[0].length }
     }
     if (marker) {
         const nextLine = lines[nextNo] || ''
@@ -2099,6 +2636,14 @@ function docTableEnter(P, body) {
     const td = n.closest ? n.closest('td, th') : null
     const tr = td ? td.closest('tr') : null
     if (!tr || !tr.parentNode) return
+    const paneIdx = Number(P.liveEditor.closest('.pane').dataset.pane) || 0
+    const tabId = state.panes[paneIdx] ? state.panes[paneIdx].tabId : null
+    if (tabId) {
+        pushEditUndo(tabId)          // 表格加行前入撤销栈
+        docUndoArmed.add(tabId)      // onDocInput 不再重复入栈
+    }
+    const table = tr.closest('table')
+    if (!table) return
     const count = tr.children.length
     const newTr = document.createElement('tr')
     for (let i = 0; i < count; i++) {
@@ -2106,7 +2651,14 @@ function docTableEnter(P, body) {
         cell.innerHTML = '<br>'   // 空单元格占位，可点击输入
         newTr.appendChild(cell)
     }
-    tr.parentNode.insertBefore(newTr, tr.nextSibling)
+    // 新行必须进 tbody：表头回车 → 插到表体最前；表体回车 → 当前行下方
+    let tbody = table.querySelector('tbody')
+    if (!tbody) { tbody = document.createElement('tbody'); table.appendChild(tbody) }
+    if (tr.parentNode === tbody) {
+        tbody.insertBefore(newTr, tr.nextSibling)
+    } else {
+        tbody.insertBefore(newTr, tbody.firstChild)
+    }
     const firstCell = newTr.querySelector('td')
     if (firstCell) {
         const r = document.createRange()
@@ -2114,6 +2666,7 @@ function docTableEnter(P, body) {
         const s = window.getSelection()
         s.removeAllRanges(); s.addRange(r)
     }
+    body.focus()   // 选区已放好，聚焦可编辑区保证后续输入落在新行单元格
     onDocInput(Number(P.liveEditor.closest('.pane').dataset.pane) || 0)
 }
 function renderLiveEditor(paneIndex) {
@@ -2209,6 +2762,7 @@ function undoLineEdit() {
     if (!tab) return
     if (liveEdit) commitLineEdit()
     tab.content = item.content
+    docUndoArmed.delete(tab.id)   // 撤销后下一次键入再记新快照
     // 同步所有打开该文件的文本框
     for (let i = 0; i < state.panes.length; i++) {
         const pEls = paneEls(i)
@@ -2226,8 +2780,12 @@ function undoLineEdit() {
 }
 
 // 向上找"行容器"元素（不越过 blk）：li / 标题 / 段落 / 引用 / 软换行行片段（span.md-line）
+// 引用块特殊处理：内部 p/li 无法逐行映射到源行（解析器把引用内容压成单个 p + <br>），
+// 因此引用内部任何点击都归一到 blockquote 本身 → 源行 = 块起始行（修复点击引用错位一行）
 function rowElementOf(node, blk) {
     let el = node && node.nodeType === 3 ? node.parentNode : node
+    const bq = el && el.closest ? el.closest('blockquote') : null
+    if (bq && blk.contains(bq)) return bq
     while (el && el !== blk) {
         if (!el.tagName) { el = el.parentNode; continue }
         const tag = el.tagName.toUpperCase()
@@ -2241,8 +2799,12 @@ function rowElementOf(node, blk) {
 // 块内行容器列表（行号映射基准）；软换行段落用 span.md-line 表示各源行，
 // 此时排除包裹它们的 <p>，避免同一段落被计数两次
 function rowElementsOf(blk) {
-    return [...blk.querySelectorAll('li, h1, h2, h3, h4, h5, h6, p, blockquote, hr, span.md-line')]
+    const list = [...blk.querySelectorAll('li, h1, h2, h3, h4, h5, h6, p, blockquote, hr, span.md-line')]
         .filter((el) => !(el.tagName === 'P' && el.querySelector('span.md-line')))
+    // 引用块：内部行容器全部归并到 blockquote 本身（与 rowElementOf 的归一逻辑一致）
+    const bq = list.find((el) => el.tagName === 'BLOCKQUOTE')
+    if (bq) return list.filter((el) => el === bq || !bq.contains(el))
+    return list
 }
 
 // 行容器 → 源行号：软换行行片段直接读 data-line；其余 = 块起始行 + 容器序号
@@ -2970,9 +3532,19 @@ function lineEditEnter() {
     const lines = f.content.split('\n')
     const curLine = le.ta.value
     const caret = (typeof le.ta.selectionStart === 'number' && le.ta.selectionStart >= 0) ? le.ta.selectionStart : curLine.length
+    // 引用行标记：支持嵌套多级（> > ），qm[1]=缩进, qm[2]=全部 '> ' 前缀
+    const qm = /^(\s*)((?:>\s?)+)/.exec(curLine)
+    const curIsBareQuote = qm && curLine.slice(qm[0].length).trim() === ''
     const marker = /^(\s*)([-*+]|\d+\.)\s+/.exec(curLine)
     const curIsBareMarker = marker && curLine.slice(marker[0].length) === ''
     const nextNo = le.lineNo + 1
+    // 当前行是"只有 > "的空引用行 → 直接在编辑器内去掉标识（两次回车结束引用）
+    if (curIsBareQuote) {
+        le.ta.value = ''
+        le.ta.focus()
+        updateLineStatus()
+        return
+    }
     // 当前行是"只有标识"（上一次回车产生）→ 直接在编辑器内去掉标识，光标保持在该行（Obsidian：两次回车结束列表）
     if (curIsBareMarker) {
         le.ta.value = ''
@@ -2982,9 +3554,18 @@ function lineEditEnter() {
     }
     // —— 行中间拆分：光标前留在本行，光标后（含列表标识）移到下一行 ——
     if (caret > 0 && caret < curLine.length) {
+        caret = adjustSplitCaret(curLine, caret)   // 光标在未闭合修饰符闭合符前 → 越过闭合符再拆
         pushEditUndo(f.path)
         const before = curLine.slice(0, caret)
         const after = curLine.slice(caret)
+        if (qm && caret >= qm[0].length) {
+            // 引用行：新行沿用完整引用前缀
+            lines[le.lineNo] = before
+            lines.splice(nextNo, 0, qm[1] + qm[2] + after)
+            f.content = lines.join('\n')
+            commitAndReopen(nextNo, qm[0].length)
+            return
+        }
         if (marker && caret >= marker[0].length) {
             // 列表行：新行沿用标识（有序编号递增）
             let prefix = marker[1] + marker[2] + ' '
@@ -3005,6 +3586,22 @@ function lineEditEnter() {
     // —— 行尾 / 空行：提交当前行（记录撤销）——
     pushEditUndo(f.path)
     lines[le.lineNo] = curLine
+    if (qm) {
+        // 引用续接：插入空引用行（下一行已是空引用行 → 去掉标识并下移，结束引用）
+        const nextLine = lines[nextNo] || ''
+        const nextQm = /^(\s*)((?:>\s?)+)/.exec(nextLine)
+        const nextIsBareQuote = nextQm && nextLine.slice(nextQm[0].length).trim() === ''
+        if (nextIsBareQuote) {
+            lines[nextNo] = ''
+            f.content = lines.join('\n')
+            commitAndReopen(nextNo)
+            return
+        }
+        lines.splice(nextNo, 0, qm[1] + qm[2])
+        f.content = lines.join('\n')
+        commitAndReopen(nextNo, qm[0].length)
+        return
+    }
     if (marker) {
         // 下一行是"空标识行"（上一次回车产生，且光标又回到本行）→ 去掉标识并下移（结束列表）
         const nextLine = lines[nextNo] || ''
@@ -3073,6 +3670,7 @@ function showPaneEditorInput(i) {
 
 // 预览态（按面板）：渲染静态阅读视图
 function showPanePreview(i) {
+    flushDocEditor(i)   // 切预览前同步防抖窗口内的编辑，避免预览显示过期内容
     const P = paneEls(i)
     const pane = state.panes[i]
     const tab = state.tabs.find((t) => t.id === pane.tabId) || null
@@ -3251,12 +3849,11 @@ async function toggleTaskLine(cb) {
     const P = paneEls(paneIdx)
     P.editor.value = content // 同步文本框，切回编辑态时内容一致
     if (!P.liveEditor.classList.contains('hidden')) renderLiveEditor(paneIdx)   // 所见即所得视图同步重渲染
-    const res = await window.electronAPI.writeFile(f.path, content)
+    const res = await writeTabSnapshot(f)
     if (!res.ok) {
         alert('保存失败：' + res.error)
         return
     }
-    f.originalContent = content // 已落盘，刷新"未保存"基线
     updateSaveStatus(paneIdx)
     if (paneIdx === state.activePane) renderOutline()
     renderTabs()
@@ -3427,6 +4024,22 @@ function updateSaveStatus(paneIndex) {
 
 // —— 自动保存（实时落盘）：防抖 600ms，写入所有有未保存修改的标签 ——
 let autoSaveTimer = null
+const fileWriteQueues = new Map()
+
+// 同一路径的写入必须按发起顺序串行完成。每次冻结路径和内容快照，避免旧请求晚到后
+// 把磁盘回退到过期文本；只有标签仍保持该快照时，才更新“已保存”基线。
+async function writeTabSnapshot(tab) {
+    const filePath = tab.path
+    const content = tab.content
+    if (!filePath || typeof content !== 'string') return { ok: false, error: '文件不可保存' }
+    const previous = fileWriteQueues.get(filePath) || Promise.resolve()
+    const write = previous.catch(() => {}).then(() => window.electronAPI.writeFile(filePath, content))
+    fileWriteQueues.set(filePath, write.catch(() => {}))
+    const res = await write
+    if (res.ok && tab.path === filePath && tab.content === content) tab.originalContent = content
+    return res
+}
+
 function scheduleAutoSave() {
     clearTimeout(autoSaveTimer)
     autoSaveTimer = setTimeout(autoSaveAll, 600)
@@ -3434,10 +4047,11 @@ function scheduleAutoSave() {
 
 async function autoSaveAll() {
     autoSaveTimer = null
+    flushDocEditor()   // 先把防抖窗口（350ms）内的编辑同步进 tab.content，否则落盘的是旧内容
     for (const tab of state.tabs) {
         if (!tab || !tab.path || typeof tab.content !== 'string') continue
         if (tab.content === tab.originalContent) continue
-        const res = await window.electronAPI.writeFile(tab.path, tab.content)
+        const res = await writeTabSnapshot(tab)
         if (!res.ok) {
             // 落盘失败：保持"未保存"状态并提示，下次输入会重试
             for (let i = 0; i < state.panes.length; i++) {
@@ -3449,7 +4063,6 @@ async function autoSaveAll() {
             }
             continue
         }
-        tab.originalContent = tab.content
         for (let i = 0; i < state.panes.length; i++) {
             if (state.panes[i].tabId === tab.id) updateSaveStatus(i)
         }
@@ -3459,14 +4072,14 @@ async function autoSaveAll() {
 
 // 保存当前文件（写回磁盘）
 async function saveFile() {
+    flushDocEditor()   // 先把防抖窗口（350ms）内的编辑同步进 tab.content，否则刚敲的字不落盘
     const f = state.currentFile
     if (!f || !f.path || !isDirty()) return   // 空白标签无可保存内容
-    const res = await window.electronAPI.writeFile(f.path, f.content)
+    const res = await writeTabSnapshot(f)
     if (!res.ok) {
         alert('保存失败：' + res.error)
         return
     }
-    f.originalContent = f.content  // 已保存，重置基线
     for (let i = 0; i < state.panes.length; i++) {
         const pane = state.panes[i]
         if (pane.tabId === f.id) updateSaveStatus(i)
@@ -3549,12 +4162,9 @@ function renderRecentFolders() {
 
 // 点击最近文件夹：直接加载，不弹系统选择框
 async function openRecentFolder(p) {
-    state.rootPath = p
-    els.currentPath.textContent = p
-    await loadRoot()
+    await enterDirectory(p)
+    if (state.rootPath !== p) return
     els.launchScreen.classList.add('hidden')
-    recordRecentFolder(p)      // 移到最前
-    renderRecentFolders()
 }
 
 // ================================================================
@@ -3630,6 +4240,7 @@ async function restoreSession() {
     try { session = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null') } catch { session = null }
     if (!session || !session.rootPath) return
     state.rootPath = session.rootPath
+    const restoreRoot = session.rootPath
     state.sortMode = session.sortMode || 'name'
     state.viewMode = session.viewMode || 'edit'
     state.sidebarCollapsed = session.sidebarCollapsed || false
@@ -3638,14 +4249,20 @@ async function restoreSession() {
     els.expandSidebarBtn.classList.toggle('hidden', !state.sidebarCollapsed)
     els.toggleSidebarBtn.textContent = state.sidebarCollapsed ? '▶' : '◀'
     await loadRoot()
+    // 恢复期间用户已打开另一个工作区：旧会话不得继续把标签塞回新工作区。
+    if (state.rootPath !== restoreRoot) return
     // 恢复标签：isNavigating 标记避免污染后退/前进历史
     isNavigating = true
     try {
-        for (const t of session.tabs || []) await openFileInNewTab(t.path)
-        if (session.activeTabId) activateTab(session.activeTabId)
+        for (const t of session.tabs || []) {
+            if (state.rootPath !== restoreRoot) return
+            await openFileInNewTab(t.path)
+        }
+        if (state.rootPath === restoreRoot && session.activeTabId) activateTab(session.activeTabId)
     } finally {
         isNavigating = false
     }
+    if (state.rootPath !== restoreRoot) return
     state.cursorLine = session.cursorLine || 1
     state.cursorCol = session.cursorCol || 1
     // 恢复面板视图模式（会话保存了 viewMode；不应用则状态栏与视图不一致）
@@ -3691,6 +4308,9 @@ async function enterDirectory(path) {
         const ok = await window.confirm('切换工作区会关闭当前所有打开的标签，确定吗？')
         if (!ok) return
     }
+    // 清空前把防抖窗口内的编辑同步并全部落盘（自动保存语义，切换工作区不丢修改）
+    flushDocEditor()
+    await autoSaveAll()
     exitBatchMode()   // 退出批量选择模式
     els.batchDialogOverlay.classList.add('hidden')
     state.rootPath = path
@@ -3770,7 +4390,7 @@ function showContextMenu(x, y, items) {
         const btn = document.createElement('div')
         btn.className = 'ctx-item' + (it.danger ? ' danger' : '')
         if (it.submenu) {
-            // 有子菜单：标题 + ▸ 箭头，子菜单绝对定位在右侧，悬停显示
+            // 有子菜单：标题 + ▸ 箭头，子菜单定位在右侧（悬停/点击展开）
             btn.classList.add('has-sub')
             const label = document.createElement('span')
             label.textContent = it.label
@@ -3788,6 +4408,26 @@ function showContextMenu(x, y, items) {
                 sub.appendChild(sbtn)
             }
             btn.appendChild(sub)
+            // 子菜单用视口定位（position: fixed），否则会被父菜单的 overflow 滚动裁剪，
+            // 出现"标题/插件命令几乎不可见"的问题
+            const positionSub = () => {
+                const r = btn.getBoundingClientRect()
+                const sw = sub.offsetWidth || 168
+                const sh = sub.offsetHeight || 220
+                let left = r.right + 2
+                if (left + sw > window.innerWidth - 4) left = r.left - sw - 2   // 右侧放不下 → 翻到左边
+                const top = Math.max(4, Math.min(r.top - 5, window.innerHeight - sh - 4))
+                sub.style.left = left + 'px'
+                sub.style.top = top + 'px'
+            }
+            btn.addEventListener('mouseenter', () => { positionSub(); sub.classList.add('open') })
+            btn.addEventListener('mouseleave', () => sub.classList.remove('open'))
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation()
+                const wasOpen = sub.classList.contains('open')
+                menu.querySelectorAll('.ctx-submenu.open').forEach((s) => s.classList.remove('open'))
+                if (!wasOpen) { positionSub(); sub.classList.add('open') }
+            })
         } else {
             btn.textContent = it.label
             btn.addEventListener('click', () => { hideContextMenu(); it.action() })
@@ -3839,9 +4479,6 @@ function showItemContextMenu(x, y, item) {
 let ctxSelStart = 0
 let ctxSelEnd = 0
 let lastCaretPos = -1   // 最后光标源偏移（实时跟踪，插件插入兜底；块编辑/文本框都更新）
-
-// 表格模板（插入时用）
-const TABLE_SNIPPET = '\n| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n| 内容 | 内容 | 内容 |\n'
 
 // 底层：用 setRangeText 替换 [start,end) 区间，并手动派发 input 事件。
 // setRangeText 本身不触发 input，不派发的话"未保存"状态不会更新。
@@ -4007,6 +4644,157 @@ els.lkInput.addEventListener('keydown', (e) => {
 })
 els.linkPicker.addEventListener('click', (e) => { if (e.target === els.linkPicker) closeLinkPicker() })
 
+// ================================================================
+// 表格：尺寸选择器（创建时自由选 行×列）+ 行/列编辑（实时编辑器右键单元格）
+// ================================================================
+const TABLE_MAX_ROWS = 10
+const TABLE_MAX_COLS = 10
+let tablePickerEl = null
+
+// 生成 N 行 × M 列表格 Markdown（N = 数据行数，M = 列数）
+function tableMarkdown(rows, cols) {
+    const header = '| ' + Array.from({ length: cols }, (_, i) => '列' + (i + 1)).join(' | ') + ' |'
+    const sep = '| ' + Array.from({ length: cols }, () => '---').join(' | ') + ' |'
+    const body = []
+    for (let r = 0; r < rows; r++) body.push('| ' + Array.from({ length: cols }, () => '内容').join(' | ') + ' |')
+    return '\n' + [header, sep, ...body].join('\n') + '\n'
+}
+
+// 弹出表格尺寸选择器（Notion 风格网格）：hover 高亮 N×M，点击确定；↑↓←→ + Enter / Esc
+function openTablePicker(x, y, onPick) {
+    closeTablePicker()
+    const wrap = document.createElement('div')
+    wrap.className = 'table-picker'
+    const grid = document.createElement('div')
+    grid.className = 'table-picker-grid'
+    const label = document.createElement('div')
+    label.className = 'table-picker-label'
+    const cells = []
+    let curR = 0
+    let curC = 0
+    const finish = (r, c) => { closeTablePicker(); onPick(r + 1, c + 1) }
+    const highlight = (r, c) => {
+        curR = Math.max(0, Math.min(TABLE_MAX_ROWS - 1, r))
+        curC = Math.max(0, Math.min(TABLE_MAX_COLS - 1, c))
+        cells.forEach((el, i) => {
+            const rr = Math.floor(i / TABLE_MAX_COLS)
+            const cc = i % TABLE_MAX_COLS
+            el.classList.toggle('hover', rr <= curR && cc <= curC)
+        })
+        label.textContent = (curR + 1) + ' 行 × ' + (curC + 1) + ' 列'
+    }
+    for (let r = 0; r < TABLE_MAX_ROWS; r++) {
+        for (let c = 0; c < TABLE_MAX_COLS; c++) {
+            const cell = document.createElement('div')
+            cell.className = 'tp-cell'
+            cell.addEventListener('mouseenter', () => highlight(r, c))
+            cell.addEventListener('click', (e) => { e.stopPropagation(); finish(r, c) })
+            grid.appendChild(cell)
+            cells.push(cell)
+        }
+    }
+    wrap.append(grid, label)
+    document.body.appendChild(wrap)
+    const rect = wrap.getBoundingClientRect()
+    const px = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))
+    const py = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))
+    wrap.style.left = px + 'px'
+    wrap.style.top = py + 'px'
+    highlight(0, 0)
+    const onKey = (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); closeTablePicker(); return }
+        if (e.key === 'ArrowUp') { e.preventDefault(); highlight(curR - 1, curC); return }
+        if (e.key === 'ArrowDown') { e.preventDefault(); highlight(curR + 1, curC); return }
+        if (e.key === 'ArrowLeft') { e.preventDefault(); highlight(curR, curC - 1); return }
+        if (e.key === 'ArrowRight') { e.preventDefault(); highlight(curR, curC + 1); return }
+        if (e.key === 'Enter') { e.preventDefault(); finish(curR, curC); return }
+    }
+    document.addEventListener('keydown', onKey)
+    wrap._onKey = onKey
+    tablePickerEl = wrap
+}
+
+function closeTablePicker() {
+    if (tablePickerEl) {
+        if (tablePickerEl._onKey) document.removeEventListener('keydown', tablePickerEl._onKey)
+        tablePickerEl.remove()
+        tablePickerEl = null
+    }
+}
+
+// 把光标放进指定单元格并聚焦可编辑区
+function placeCaretInCell(cell) {
+    if (!cell || !cell.isConnected) return
+    const r = document.createRange()
+    r.setStart(cell, 0); r.setEnd(cell, 0)
+    const s = window.getSelection()
+    s.removeAllRanges(); s.addRange(r)
+    const P = curPaneEls()
+    const body = P.liveEditor ? P.liveEditor.querySelector('.md-body') : null
+    if (body) body.focus()
+}
+
+// 表格行/列编辑（实时编辑器右键单元格）：直接操作 DOM，序列化自动回写源码
+function tableRowColOp(op) {
+    const sel = window.getSelection()
+    let n = sel.rangeCount ? sel.getRangeAt(0).startContainer : null
+    if (n && n.nodeType === 3) n = n.parentNode
+    const td = n && n.closest ? n.closest('td, th') : null
+    if (!td) return
+    const table = td.closest('table')
+    const tr = td.closest('tr')
+    if (!table || !tr) return
+    const paneIdx = table.closest('.pane') ? Number(table.closest('.pane').dataset.pane) : state.activePane
+    const tabId = state.panes[paneIdx] ? state.panes[paneIdx].tabId : null
+    if (tabId) {
+        pushEditUndo(tabId)          // 行/列增删前入撤销栈
+        docUndoArmed.add(tabId)      // onDocInput 不再重复入栈
+    }
+    const colIdx = [...tr.children].indexOf(td)
+    const isHeader = tr.parentNode && tr.parentNode.tagName === 'THEAD'
+    const makeCell = () => { const c = document.createElement('td'); c.innerHTML = '<br>'; return c }
+    let focusCell = null
+    if (op === 'rowAbove' || op === 'rowBelow') {
+        const newTr = document.createElement('tr')
+        for (let i = 0; i < tr.children.length; i++) newTr.appendChild(makeCell())
+        if (isHeader) {
+            // 表头行：新行插到表体最前（表头上方没有行可插）
+            let tbody = table.querySelector('tbody')
+            if (!tbody) { tbody = document.createElement('tbody'); table.appendChild(tbody) }
+            tbody.insertBefore(newTr, tbody.firstChild)
+        } else {
+            tr.parentNode.insertBefore(newTr, op === 'rowAbove' ? tr : tr.nextSibling)
+        }
+        focusCell = newTr.children[colIdx] || newTr.firstChild
+    } else if (op === 'deleteRow') {
+        if (isHeader) { showNotice('不能删除表头行'); return }
+        const next = tr.nextElementSibling
+        const prev = tr.previousElementSibling
+        tr.remove()
+        // 光标落到下方行同列（没有则上一行），尽量保持编辑位置
+        const target = next || prev
+        focusCell = target ? (target.children[colIdx] || target.lastChild) : null
+    } else if (op === 'colLeft' || op === 'colRight') {
+        const at = op === 'colLeft' ? colIdx : colIdx + 1
+        const rows = [...table.querySelectorAll('thead tr, tbody tr')]
+        for (const row of rows) {
+            const cell = makeCell()
+            row.insertBefore(cell, row.children[at] || null)
+        }
+        focusCell = tr.children[at] || tr.lastChild
+    } else if (op === 'deleteCol') {
+        const rows = [...table.querySelectorAll('thead tr, tbody tr')]
+        if (!rows.length || rows[0].children.length <= 1) { showNotice('至少保留一列'); return }
+        for (const row of rows) {
+            const cell = row.children[colIdx]
+            if (cell) cell.remove()
+        }
+        focusCell = tr.children[Math.min(colIdx, tr.children.length - 1)] || tr.lastChild
+    }
+    onDocInput(paneIdx)
+    if (focusCell) setTimeout(() => placeCaretInCell(focusCell), 0)
+}
+
 // 编辑器右键菜单：插入子菜单 + 链接 + 常用编辑操作
 function showEditorContextMenu(x, y) {
     // 标题：H1-H6 子菜单（参考 Obsidian）
@@ -4026,7 +4814,8 @@ function showEditorContextMenu(x, y) {
         { label: '有序列表', action: () => linePrefix('1. ') },
         { label: '任务列表', action: () => linePrefix('- [ ] ') },
         { label: '分割线', action: () => insertAtCursor('\n---\n') },
-        { label: '表格', action: () => insertAtCursor(TABLE_SNIPPET) },
+        // setTimeout 延后到点击冒泡结束再开选择器，否则 document 级关闭监听会立刻把它关掉
+        { label: '表格', action: () => { hideContextMenu(); setTimeout(() => openTablePicker(x, y, (r, c) => insertAtCursor(tableMarkdown(r, c))), 0) } },
         { label: '图片', action: () => insertImage() },
     ]
     const items = []
@@ -4282,11 +5071,24 @@ function handleLiveEditorCtxMenu(e) {
             const norm = f.content.replace(/\r\n/g, '\n')
             f.content = norm.slice(0, pos) + '\n---\n' + norm.slice(pos)
         }, lineNo) },
-        { label: '表格', action: () => pos >= 0 && srcApply((f) => {
-            const norm = f.content.replace(/\r\n/g, '\n')
-            f.content = norm.slice(0, pos) + TABLE_SNIPPET + norm.slice(pos)
-        }, lineNo) },
+        { label: '表格', action: () => { hideContextMenu(); setTimeout(() => openTablePicker(e.clientX, e.clientY, (r, c) => {
+            if (pos >= 0) srcApply((f) => {
+                const norm = f.content.replace(/\r\n/g, '\n')
+                f.content = norm.slice(0, pos) + tableMarkdown(r, c) + norm.slice(pos)
+            }, lineNo)
+        }), 0) } },
     )
+    // 右键落在表格单元格内：提供行/列增删（所见即所得模式下直接编辑表格结构）
+    if (target.closest && target.closest('td, th')) {
+        items.push({ label: '▦ 表格行/列', submenu: [
+            { label: '⬆ 上方插入行', action: () => tableRowColOp('rowAbove') },
+            { label: '⬇ 下方插入行', action: () => tableRowColOp('rowBelow') },
+            { label: '🗑 删除当前行', danger: true, action: () => tableRowColOp('deleteRow') },
+            { label: '◀ 左侧插入列', action: () => tableRowColOp('colLeft') },
+            { label: '▶ 右侧插入列', action: () => tableRowColOp('colRight') },
+            { label: '🗑 删除当前列', danger: true, action: () => tableRowColOp('deleteCol') },
+        ] })
+    }
     // 行操作（Obsidian 高频）：复制 / 删除 / 上移 / 下移当前行
     items.push(
         { label: '⧉ 复制当前行', action: () => lineNo >= 0 && srcApply((f) => {
@@ -4389,10 +5191,12 @@ function validName(name) {
 }
 
 async function createNewFile(dir) {
-    const name = await window.prompt('新文件名：')
+    const name = await window.prompt('新文件名：', '', { hint: '默认为 Markdown 文件：未输入扩展名时自动补全 .md' })
     if (!name) return
     if (!validName(name)) { alert('文件名包含非法字符'); return }
-    const res = await window.electronAPI.createFile(joinPath(dir, name))
+    // 无扩展名默认创建 Markdown（.md），有扩展名按用户指定类型创建
+    const fname = /\./.test(name) ? name : name + '.md'
+    const res = await window.electronAPI.createFile(joinPath(dir, fname))
     if (!res.ok) { alert('新建失败：' + res.error); return }
     await refreshDir(dir)
 }
@@ -7485,21 +8289,28 @@ document.getElementById('closewindow').addEventListener('click', () => window.el
 // 覆盖所有关闭途径：关闭按钮 / Alt+F4 / 任务栏
 window.electronAPI.onConfirmClose(async () => {
     if (liveEdit) commitLineEdit()   // 先把未提交的行编辑落进 content
+    flushDocEditor()                 // 先把整文档防抖窗口内的编辑同步进 content（退出不丢最后输入）
     if (anyDirty()) {
         const ok = await window.confirm('有文件未保存，确定退出吗？')
         if (!ok) return
     }
+    await autoSaveAll()             // 退出前把未保存的修改全部落盘
     flushAiConvoSave()          // 退出前落盘 AI 会话
     saveSession()               // 退出前保存会话
     window.electronAPI.doClose()
 })
 window.addEventListener('beforeunload', () => {
+    flushDocEditor()
     flushAiConvoSave()
     saveSession()               // 兜底：系统方式关闭也保存
 })
 
 // 全局按键：点击别处 / 按 Esc 关闭右键菜单
 document.addEventListener('click', hideContextMenu)
+// 点击表格尺寸选择器以外区域 → 关闭
+document.addEventListener('click', (e) => {
+    if (tablePickerEl && !tablePickerEl.contains(e.target)) closeTablePicker()
+})
 // 输入框提供标准编辑右键菜单（剪切/复制/粘贴/全选）；其余区域仍禁用原生菜单
 document.addEventListener('contextmenu', (e) => {
     const t = e.target
